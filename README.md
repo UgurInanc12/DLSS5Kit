@@ -213,7 +213,7 @@ only the packaging changed:
 | one-file exe, no version resource (v1.6.0) | 6/70 | `Trojan:Win32/Wacatac.B!ml` |
 | one-file exe, version resource added | 3-4/70 | unstable between builds |
 | folder build, launcher exe alone | 2/70 | `Wacatac.C!ml` |
-| **folder build, zipped (what you download now)** | **1/70** | **clean** |
+| **folder build, zipped (what you download now)** | **0/60** | **clean** |
 | Nuitka standalone exe (tried, rejected) | 2/70 | ESET + Microsoft |
 
 **Why the one-file build looked suspicious.** A PyInstaller one-file exe is a
@@ -232,10 +232,13 @@ worse, because ESET then flags its packer signature.
 `DLSS5Kit.exe` from inside it. Keep the folder together - the exe needs the
 files next to it.
 
-The one remaining engine (MaxSecure, `susgen` = generic suspicion) and the
-occasional heuristic hit are unavoidable without a code-signing certificate,
-which costs money and changes no behaviour. Here is what causes them, and how
-to verify the tool yourself rather than taking anyone's word for it.
+The published v1.7.0 zip was scanned after release and came back **0/60,
+no engine flagging it, Microsoft and ESET both clean**. Heuristic hits can
+still reappear on a future build, since these are reputation systems and this
+executable is unsigned; a code-signing certificate is the only permanent
+answer and it costs money without changing any behaviour. Here is what drives
+the detections when they do appear, and how to verify the tool yourself
+rather than taking anyone's word for it.
 
 **Why it happens**
 
