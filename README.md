@@ -201,17 +201,25 @@ Not affiliated with NVIDIA, ReShade or RenoDX. Use at your own risk.
 
 ## Antivirus false positives
 
-A few engines on VirusTotal flag the released `DLSS5Kit.exe`. Measured, with
-the fix applied:
+A few engines on VirusTotal flag the released `DLSS5Kit.exe`. Measured on
+VirusTotal, same source, only the build metadata changed:
 
-| Build | Detections | Microsoft Defender |
+| Build | Detections | Microsoft |
 |---|---|---|
-| v1.6.0 (no version resource) | **6/70** | `Trojan:Win32/Wacatac.B!ml` |
-| v1.6.1 (version resource added) | **3/70** | clean |
+| v1.6.0, no version resource | **6/70** | `Trojan:Win32/Wacatac.B!ml` |
+| v1.6.1, version resource added | **3-4/70** | varies between runs |
 
-The remaining three (Bkav, Zillya, APEX) are generic heuristic buckets that
-flag PyInstaller output broadly. Here is what causes it, and how to check the
-claim yourself rather than taking anyone's word for it.
+Adding proper file metadata removed Skyhigh's `BehavesLike.Win64.Injector`,
+Elastic and SecureAge outright. What remains is Bkav, Zillya and APEX, which
+bucket PyInstaller output generically, plus Microsoft's `Wacatac.B!ml`, which
+is unstable: two v1.6.1 binaries built from the same commit scored 3/70 with
+Microsoft clean and 4/70 with Microsoft flagging. The `!ml` suffix is
+Microsoft's own marker for "machine-learning guess", and it behaves like one.
+A locally installed, fully updated Defender reports **no threats** on the same
+files (`MpCmdRun.exe -Scan -ScanType 3 -File DLSS5Kit.exe`).
+
+Here is what causes the detections, and how to check the claim yourself
+rather than taking anyone's word for it.
 
 **Why it happens**
 
@@ -235,9 +243,10 @@ no CompanyName, no FileDescription, no FileVersion. To an ML classifier that
 is an anonymous packed binary, which is most of what it was trained to catch.
 v1.6.1 embeds proper metadata (publisher, description, version, licence, the
 repository URL), generated from the package version at build time. That alone
-halved the detections and cleared Microsoft. It is not a trick to evade
-scanners: it is the file telling the truth about itself, which it previously
-did not.
+removed half the detections, including the injector-behaviour flag. It is not
+a trick to evade scanners: it is the file telling the truth about itself,
+which it previously did not. The honest limit: it does not reliably silence
+Microsoft's ML classifier, because nothing short of code signing does.
 
 **What it is not:** there is no process injection into running programs, no
 persistence, no obfuscated payload and no telemetry. Grepping the source for
