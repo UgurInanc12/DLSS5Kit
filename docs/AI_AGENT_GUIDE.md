@@ -368,6 +368,11 @@ files) and writes a labelled side-by-side `[compare]` PNG next to them.
   and no precision switch. `--nr-report` states which case the installed
   file is.
 - NR costs are large on Ampere (community numbers: roughly 40-80% frame-rate
-  loss depending on title and resolution). The honest levers: lower output
-  resolution, and `--nr-upscaling on` IF the runtime accepts it (the overlay's
-  "Upscaling: requested/active" line says whether it did).
+  loss depending on title and resolution; measured RTX 3090 examples:
+  Shadow of the Tomb Raider 1440p 180 -> 42 fps, Hogwarts Legacy ~30 fps).
+  The honest levers: lower output resolution, and `--nr-upscaling on` IF the
+  runtime accepts it (the overlay's "Upscaling: requested/active" line says
+  whether it did).
+- Do NOT toggle neural rendering on/off repeatedly in one session: community
+  reports put the leak at roughly 1 GB of VRAM per toggle on current builds.
+  Toggle for a comparison, take the F5 pair, and leave it in one state.
