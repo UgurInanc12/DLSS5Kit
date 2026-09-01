@@ -395,15 +395,30 @@ def runtime_report(path: Path, sm: int | None) -> dict:
     if sm is not None:
         out["native_for_card"] = sm in archs.cubin
 
-    # Precision markers, read from the binary itself.
+    # Precision markers, and whether the build can upscale at all - read from
+    # the binary itself. Measured 2026-09-01 across every published build
+    # (310.8.0, -RTX40, SF, SF-v2): all contain ZERO occurrences of "upscal",
+    # while nvngx_dlss.dll of the same vintage has 95. So NREnableUpscaling
+    # is refused with 0xbad00005 no matter how it is configured, and NR always
+    # runs at the full output resolution. Reported rather than guessed at.
+    fp8 = False
     try:
         import mmap
         with open(path, "rb") as fh:
             data = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
             fp8 = data.find(b"NGXCubinFormat_sE4M3") >= 0
+            up = (data.find(b"upscal") >= 0) or (data.find(b"Upscal") >= 0)
             data.close()
+        out["upscaling_capable"] = up
+        out["upscaling_note"] = (
+            "this build carries upscaling code paths"
+            if up else
+            "no upscaling code paths in this build: NREnableUpscaling is "
+            "refused (0xbad00005) and NR runs at the full output resolution. "
+            "Lower the output resolution to cut the NR cost.")
     except OSError:
-        fp8 = False
+        out["upscaling_capable"] = None
+        out["upscaling_note"] = ""
     if fp8:
         out["precision"] = "fp8 (E4M3) quantized weights"
         if sm is not None and sm < 89:

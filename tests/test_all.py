@@ -1071,6 +1071,15 @@ def test_runtime_report():
           rep["precision"])
     check("the note explains the SF fp16 story", "fp16" in rep["note"],
           rep["note"][:80])
+    # Upscaling: every published dlssnr build refuses it, and the reason is
+    # visible in the binary - zero upscaling code paths, against 95 in
+    # nvngx_dlss.dll. Measured after the runtime answered 0xbad00005 on a
+    # real 864x486 -> 2560x1440 attempt in Crysis 3, 2026-09-01.
+    check("upscaling capability reported", rep["upscaling_capable"] is False,
+          str(rep.get("upscaling_capable")))
+    check("and explained", "output resolution" in rep.get("upscaling_note", ""),
+          rep.get("upscaling_note", "")[:60])
+
     rep2 = gpu.runtime_report(Path("Z:/nowhere/nvngx_dlssnr.dll"), 86)
     check("missing file reported, not crashed", rep2["note"] == "file not found")
 

@@ -370,9 +370,16 @@ files) and writes a labelled side-by-side `[compare]` PNG next to them.
 - NR costs are large on Ampere (community numbers: roughly 40-80% frame-rate
   loss depending on title and resolution; measured RTX 3090 examples:
   Shadow of the Tomb Raider 1440p 180 -> 42 fps, Hogwarts Legacy ~30 fps).
-  The honest levers: lower output resolution, and `--nr-upscaling on` IF the
-  runtime accepts it (the overlay's "Upscaling: requested/active" line says
-  whether it did).
+- **NR always runs at the OUTPUT resolution.** Changing the game's DLSS
+  quality mode does NOT reduce the NR cost. Measured on Crysis 3 Remastered
+  2026-09-01: with DLSS Performance the game rendered 864x486 and NR still
+  processed 2560x1440. `NREnableUpscaling` exists but every published
+  nvngx_dlssnr build (310.8.0, -RTX40, SF, SF-v2) refuses it - the runtime
+  returns 0xbad00005 and logs "the signed runtime rejected the low-resolution
+  color contract". The binaries confirm why: zero upscaling code paths in
+  each, against 95 in nvngx_dlss.dll. `--nr-report` reports this per file
+  (`upscaling: False`). The only real lever for fps is a lower output
+  resolution - and it must be set BEFORE neural rendering is switched on.
 - Do NOT toggle neural rendering on/off repeatedly in one session: community
   reports put the leak at roughly 1 GB of VRAM per toggle on current builds.
   Toggle for a comparison, take the F5 pair, and leave it in one state.

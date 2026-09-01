@@ -203,11 +203,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rr-preset", choices=list(presets.RR_PRESETS),
                    help="Ray Reconstruction render preset override")
     p.add_argument("--nr-upscaling", choices=["on", "off"],
-                   help="EXPERIMENTAL: ask the NR runtime to run at the "
-                        "game's DLSS input resolution and upscale itself "
-                        "(NREnableUpscaling). Current runtime builds may "
-                        "refuse it and fall back to the native path; the "
-                        "overlay status line says which happened.")
+                   help="write NREnableUpscaling. MEASURED: no released "
+                        "nvngx_dlssnr build implements upscaling (zero "
+                        "upscaling code paths in every 310.8 build), so "
+                        "this currently always falls back to the native "
+                        "path with 0xbad00005. Kept for future runtimes.")
     p.add_argument("--generation", "--gen", dest="generation", default="auto",
                    help="RTX generation: auto (default), 20, 30, 40 or 50")
     p.add_argument("--route", choices=[routes.NATIVE, routes.BRIDGE, routes.FEEDER],
@@ -286,6 +286,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"kernels : {sms}")
             print(f"native  : {rep['native_for_card']}")
             print(f"precision: {rep['precision']}")
+            print(f"upscaling: {rep.get('upscaling_capable')}")
+            if rep.get("upscaling_note"):
+                print(f"          {rep['upscaling_note']}")
             if rep["note"]:
                 print(f"note    : {rep['note']}")
         return 0
@@ -330,11 +333,16 @@ def main(argv: list[str] | None = None) -> int:
             ini.save(game_dir / "ReShade.ini")
             changed.append(game_dir / "ReShade.ini")
             if a.nr_upscaling == "on":
-                print("NREnableUpscaling=1 written. The runtime may refuse it "
-                      "and continue on the native path; the add-on overlay's "
-                      "'Upscaling: requested/active' line reports which. Use "
-                      "a DLSS Balanced/Performance mode in game so there is "
-                      "a lower-resolution input to work at.")
+                print("NREnableUpscaling=1 written.\n"
+                      "  Be aware: every released nvngx_dlssnr build refuses "
+                      "this. Measured on 310.8 SF / SF-v2 / RTX40 / base - "
+                      "all contain zero upscaling code paths, while "
+                      "nvngx_dlss.dll has 95. The runtime answers "
+                      "0xbad00005 and NR continues at the full output "
+                      "resolution.\n"
+                      "  To actually cut the NR cost, lower the game's "
+                      "OUTPUT resolution; the DLSS quality mode does not "
+                      "change how many pixels NR processes.")
             else:
                 print("NREnableUpscaling=0 written (native path).")
         for c in dict.fromkeys(changed):

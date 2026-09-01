@@ -307,17 +307,31 @@ void draw_overlay(reshade::api::effect_runtime *) {
   ImGui::TextUnformatted("Neural rendering resolution");
   ImGui::Separator();
 
-  if (ImGui::Checkbox("NR upscaling (run NR at the DLSS input resolution)",
+  if (ImGui::Checkbox("NR upscaling (refused by every known runtime build)",
                       &g_state.nr_upscaling))
     apply_nr_upscaling();
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip(
-        "Asks the DLSS 5 add-on to feed NR the low-resolution frame\n"
-        "and let it upscale, instead of running NR on the full output.\n"
-        "Current runtime builds may refuse the contract and fall back\n"
-        "to the native path - the add-on's own status line says which.");
+        "MEASURED, not guessed: no released nvngx_dlssnr build implements\n"
+        "upscaling. Every 310.8 build (SF, SF-v2, RTX40, base) contains\n"
+        "zero upscaling code paths, while nvngx_dlss.dll has 95. Turning\n"
+        "this on makes the runtime answer 0xbad00005 and the add-on log\n"
+        "'the signed runtime rejected the low-resolution color contract'.\n"
+        "\n"
+        "Left here because a future runtime may add it - the add-on\n"
+        "detects and uses it automatically if one ever does.\n"
+        "\n"
+        "For fps today: lower the OUTPUT resolution. NR always runs at\n"
+        "the full output size, so that is the only lever that changes\n"
+        "how many pixels it processes.");
 
-  ImGui::TextUnformatted("NR working resolution comes from the game's DLSS mode:");
+  ImGui::TextUnformatted(
+      "NR runs at your OUTPUT resolution, not the DLSS render resolution.");
+  ImGui::TextDisabled(
+      "Measured on Crysis 3: the game rendered 864x486 (DLSS Performance)\n"
+      "and NR still had to process 2560x1440. Changing the DLSS quality\n"
+      "mode does NOT reduce the NR cost on current runtimes.");
+  ImGui::TextUnformatted("What the game's DLSS mode does change (its own cost):");
   if (ImGui::BeginTable("scale", 2, ImGuiTableFlags_SizingFixedFit)) {
     struct Row { const char *mode, *pct; };
     const Row rows[] = {
@@ -325,7 +339,7 @@ void draw_overlay(reshade::api::effect_runtime *) {
         {"Performance",       "50% per axis"},
         {"Balanced",          "58% per axis"},
         {"Quality",           "67% per axis"},
-        {"DLAA / no upscaling", "100% (most expensive)"},
+        {"DLAA / no upscaling", "100%"},
     };
     for (const Row &r : rows) {
       ImGui::TableNextRow();
@@ -336,8 +350,33 @@ void draw_overlay(reshade::api::effect_runtime *) {
     }
     ImGui::EndTable();
   }
+
+  // The one lever that does change the NR cost, with the arithmetic done.
+  ImGui::Spacing();
+  ImGui::TextUnformatted("NR pixel cost at common output resolutions:");
+  if (ImGui::BeginTable("out", 3, ImGuiTableFlags_SizingFixedFit)) {
+    struct Out { const char *res; long px; };
+    const Out outs[] = {
+        {"3840x2160", 8294400L}, {"2560x1440", 3686400L},
+        {"1920x1080", 2073600L}, {"1600x900",  1440000L},
+        {"1280x720",   921600L},
+    };
+    const long base = 3686400L;  // 1440p reference
+    for (const Out &o : outs) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextUnformatted(o.res);
+      ImGui::TableSetColumnIndex(1);
+      ImGui::Text("%.1f MPix", o.px / 1000000.0);
+      ImGui::TableSetColumnIndex(2);
+      ImGui::Text("%.2fx vs 1440p", static_cast<double>(o.px) / base);
+    }
+    ImGui::EndTable();
+  }
   ImGui::TextDisabled(
-      "Lower mode = fewer pixels through NR = more fps, softer image.");
+      "Halving the pixel count roughly halves the neural-rendering cost.\n"
+      "Set the resolution BEFORE enabling NR: the feature is built for one\n"
+      "backbuffer size and changing it live can freeze the game.");
 
   if (g_state.has_feed_cfg) {
     ImGui::Spacing();
