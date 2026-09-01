@@ -202,8 +202,6 @@ def main(argv: list[str] | None = None) -> int:
                    help="a ReShade_Setup_*_Addon.exe to use instead of downloading")
     p.add_argument("--work-resolution", type=int, default=100,
                    help="feeder neural work area, 50-100 (default 100)")
-    p.add_argument("--replace-game-dlss", action="store_true",
-                   help="replace the game's own nvngx_dlss.dll (backed up)")
     p.add_argument("--ignore-gpu-mismatch", action="store_true",
                    help="install even when the build has no code for your card")
     p.add_argument("--yes", "-y", action="store_true",
@@ -287,7 +285,6 @@ def main(argv: list[str] | None = None) -> int:
         provider=a.provider,
         local_dir=a.local,
         reshade_setup=a.reshade_setup,
-        keep_game_dlss=not a.replace_game_dlss,
         ignore_gpu_mismatch=a.ignore_gpu_mismatch,
         card=card,
         work_resolution=max(50, min(100, a.work_resolution)),

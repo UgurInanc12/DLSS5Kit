@@ -95,7 +95,6 @@ class Options:
     dlss_version: str | None = None
     local_dir: Path | None = None     # a folder of already-downloaded files
     reshade_setup: Path | None = None # a ReShade_Setup_*_Addon.exe on disk
-    keep_game_dlss: bool = True       # do not replace the game's nvngx_dlss.dll
     ignore_gpu_mismatch: bool = False
     card: "gpu.Card | None" = None    # None = detect it
     work_resolution: int = 100
@@ -643,30 +642,27 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
                 rep.warnings.append(f"could not verify GPU compatibility ({why})")
 
         begin("nvngx_dlss.dll")
-        # "The game ships its own" is only true when the game actually calls
-        # NGX. On a game that never does, a loose nvngx_dlss.dll is somebody's
-        # leftover, and keeping it would pin an unknown build in place.
-        game_has_own = ((root / DLSS).is_file()
-                        and _rel(root / DLSS, root) not in rep.written
-                        and api.uses_ngx)
-        stray = ((root / DLSS).is_file()
-                 and _rel(root / DLSS, root) not in rep.written
-                 and not api.uses_ngx)
-        if game_has_own and opt.keep_game_dlss:
-            log("      the game ships its own nvngx_dlss.dll, left untouched")
-            rep.skipped.append(DLSS)
-        elif DLSS in local and not opt.dlss_version:
-            if stray:
+        # The runtime is ALWAYS updated. A game ships whatever DLSS build it
+        # was released with - Metro Exodus Enhanced Edition carries a 13.8 MB
+        # nvngx_dlss.dll from 2021 - and leaving that in place means the
+        # neural pass runs against a years-old runtime. The game's original is
+        # copied to nvngx_dlss.dll.dlss5kit-backup first and restored by
+        # Remove, so nothing is lost.
+        replacing_game_file = ((root / DLSS).is_file()
+                               and _rel(root / DLSS, root) not in rep.written)
+        if replacing_game_file:
+            if api.uses_ngx:
+                log("      updating the game's own nvngx_dlss.dll (backed up, "
+                    "restored by Remove)")
+            else:
                 log("      replacing a stray nvngx_dlss.dll (this game does "
                     "not call NGX, so it is not the game's own)")
+        if DLSS in local and not opt.dlss_version:
             _copy(local[DLSS], root / DLSS, rep, root)
             log(f"      {DLSS} (local file)")
             rep.components["dlss"] = "local"
             _warn_dlss_gpu(root / DLSS, sm, card, rep, log)
         else:
-            if stray:
-                log("      replacing a stray nvngx_dlss.dll (this game does "
-                    "not call NGX, so it is not the game's own)")
             e = sources.pick(cat()["dlss"], opt.dlss_version)
             f = dl(e["url"], f"dlss-{e['label']}.zip")
             _place(extract_member(f, DLSS), root / DLSS, rep, root)

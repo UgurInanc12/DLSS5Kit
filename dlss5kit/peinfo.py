@@ -46,7 +46,8 @@ _SKIP_PARTS = (
     "crashhandler", "crashreport", "crashpad", "easyanticheat", "battleye",
     "touchup", "installer", "activation", "cleanup", "helper", "webhelper",
     "unitycrashhandler", "ue4prereqsetup", "ue5prereqsetup", "epicwebhelper",
-    "dxc", "shadercompile", "benchmark", "launcher",
+    "dxc", "shadercompile", "benchmark", "launcher", "downloader", "updater",
+    "patcher", "repair", "diagnostic", "reporter", "bugtrap", "jirabugtrap",
 )
 
 _PRUNE_DIRS = {
@@ -373,6 +374,71 @@ class ApiInfo:
                 or self.streamline or self.nvngx)
 
 
+def api_from_neighbour_dlls(folder: Path) -> tuple[str | None, str]:
+    """Infer the renderer from the DLLs shipped beside the executable.
+
+    Some engines put the whole renderer in a separate module and leave the
+    executable a thin launcher. Measured on this workstation 2026-09-01:
+
+        Bills Must Be Paid   exe 0.7 MB, renderer inside UnityPlayer.dll
+        PlagueIncEvolved     exe 0.7 MB, renderer inside UnityPlayer.dll
+        Battlefield 6        Engine.Render.Core2.PlatformPcDx12.retail.dll
+
+    Scanning the executable alone reports "no graphics API could be
+    identified" for all three, so the neighbours are consulted before giving
+    up. Named engine modules are checked first, then any DLL whose own name
+    announces the API.
+    """
+    if not folder or not folder.is_dir():
+        return None, ""
+
+    names = {}
+    try:
+        for p in folder.iterdir():
+            if p.is_file() and p.suffix.lower() == ".dll":
+                names[p.name.lower()] = p
+    except OSError:
+        return None, ""
+
+    # A module whose FILE NAME states the API is the strongest hint here.
+    for n in names:
+        if "dx12" in n or "d3d12" in n:
+            return DX12, f"a renderer module beside the executable is named {n}"
+        if "vulkan" in n or n.startswith("vk"):
+            return VULKAN, f"a renderer module beside the executable is named {n}"
+    for n in names:
+        if "dx11" in n or "d3d11" in n:
+            return DX11, f"a renderer module beside the executable is named {n}"
+
+    # Engine runtimes: scan the module itself, it holds the real strings.
+    #
+    # CAUTION: a general-purpose engine module contains EVERY backend it can
+    # use, so presence alone proves nothing. Measured on PlagueInc's
+    # UnityPlayer.dll 2026-09-01: d3d11 x79, d3d12 x103, vulkan-1 x1. An
+    # early "if vulkan: return VULKAN" reported Vulkan for a game that runs
+    # D3D11 by default. So the counts are weighed, DXGI decides between the
+    # two Direct3D versions, and Vulkan only wins when it clearly dominates.
+    for engine in ("unityplayer.dll", "gameassembly.dll"):
+        if engine not in names:
+            continue
+        s = scan_strings(names[engine])
+        d11, d12 = s.get("d3d11", 0), s.get("d3d12", 0)
+        vk, dxgi = s.get("vulkan", 0), s.get("dxgi", 0)
+        direct3d = d11 + d12 + dxgi
+        # Compare Direct3D as a whole against Vulkan: a single "vulkan-1"
+        # string outnumbering "d3d11" alone is not evidence of a Vulkan game
+        # when DXGI and D3D12 are also present (measured: Bills Must Be Paid
+        # has d3d11 x2, d3d12 x1, dxgi x5, vulkan x3 - Direct3D 8 to 3).
+        if direct3d and direct3d >= vk:
+            api = DX12 if d12 > d11 * 2 else DX11
+            return api, (f"{engine} carries every backend "
+                         f"(Direct3D x{direct3d}, Vulkan x{vk}); "
+                         f"Direct3D is the Windows default")
+        if vk:
+            return VULKAN, f"{engine} is predominantly Vulkan (x{vk})"
+    return None, ""
+
+
 def detect_api(exe: Path, folder: Path | None = None) -> ApiInfo:
     """Work out the graphics API, using the strongest evidence available."""
     info = ApiInfo()
@@ -452,6 +518,15 @@ def detect_api(exe: Path, folder: Path | None = None) -> ApiInfo:
     if has_imp("d3d9.dll") or s.get("d3d9", 0):
         info.api, info.reason, info.confidence = DX9, "uses d3d9.dll, no DXGI", "medium"
         return info
+
+    # Tier 4: the executable said nothing. Some engines keep the renderer in a
+    # separate module (Unity, and engines with a named PlatformPcDx12 DLL), so
+    # ask the neighbours before reporting Unknown.
+    if folder is not None:
+        api, why = api_from_neighbour_dlls(folder)
+        if api:
+            info.api, info.reason, info.confidence = api, why, "medium"
+            return info
 
     info.api, info.reason, info.confidence = (
         UNKNOWN, "no graphics API could be identified", "low")

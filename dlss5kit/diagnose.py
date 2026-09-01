@@ -54,23 +54,81 @@ _CREATE_FEATURE_EXC = re.compile(
     r"CreateFeature raised exception (0x[0-9A-Fa-f]+)")
 _MV_PROBE = re.compile(r"MV probe[^\n]*?(\d+)%\s*non-zero", re.I)
 
+# dlss5-bridge writes its own log. It is the only place that says whether the
+# bridge route is actually delivering frames, and reading it turns "the game
+# reported an NGX error" from an alarm into a fact with context.
+_BRIDGE_FRAME = re.compile(r"\[bridge\] frame (\d+) delivered \((\d+)x(\d+)\)")
+_BRIDGE_STATS = re.compile(
+    r"\[bridge\] \d+ frames: bridge CPU ([\d.]+) ms/frame.*?"
+    r"bridge is (\d+)% of the frame")
+_BRIDGE_ATTACH = re.compile(r"dlss5-bridge ([\d.]+) .*?attached", re.I)
+# "05:44:40" or "05:44:40.123" at the start of a log line, either bracketed
+# by <> (the game's own log) or bare (the bridge's).
+_TS = re.compile(r"<?(\d{2}):(\d{2}):(\d{2})")
+
+
+def _seconds(text: str) -> int | None:
+    m = _TS.search(text)
+    if not m:
+        return None
+    h, mi, s = (int(g) for g in m.groups())
+    return h * 3600 + mi * 60 + s
+
+
+def _read_bridge_log(root: Path) -> dict:
+    """What dlss5-bridge.log says about this run. {} when there is none."""
+    log = root / "dlss5-bridge.log"
+    if not log.is_file():
+        return {}
+    text = _tail(log, 2_000_000)
+    frames = _BRIDGE_FRAME.findall(text)
+    stats = _BRIDGE_STATS.findall(text)
+    attach = _BRIDGE_ATTACH.search(text)
+    first_ts = _seconds(text[:200])
+    return {
+        "present": True,
+        "version": attach.group(1) if attach else None,
+        "frames": int(frames[-1][0]) if frames else 0,
+        "resolution": f"{frames[-1][1]}x{frames[-1][2]}" if frames else None,
+        "cpu_ms": float(stats[-1][0]) if stats else None,
+        "frame_share": int(stats[-1][1]) if stats else None,
+        "clean_shutdown": "shut down cleanly" in text,
+        "attached_at": first_ts,
+    }
+
 
 def diagnose(game_dir: Path, route: str | None = None) -> Diagnosis:
     """Read whichever logs apply and say, in words, what happened."""
     root = Path(game_dir)
     d = Diagnosis()
 
+    # Read the bridge log first: on the bridge route it is the ground truth,
+    # and it changes how the game's own NGX errors should be read.
+    bridge = _read_bridge_log(root)
+
     # ---------------------------------------------------------- ReShade.log
     rlog = root / "ReShade.log"
     if not rlog.is_file():
-        d.add(BAD, "ReShade.log does not exist, so ReShade never loaded.",
-              "The game has not been run since installing, or the proxy DLL "
-              "is not being loaded - try renaming dxgi.dll to d3d11.dll.")
-        d.verdict = BAD
-        d.summary = "ReShade never loaded. Run the game once, then check again."
-        return d
-
-    text = _tail(rlog)
+        if bridge.get("frames"):
+            # The bridge delivered frames, so everything loaded. Some games
+            # write ReShade.log elsewhere, or a cleanup tool removed it; that
+            # is not a failure when there is proof of frames.
+            d.add(OK, f"The bridge delivered {bridge['frames']:,} frames, so "
+                      f"the whole chain loaded.",
+                  "ReShade.log is absent, but dlss5-bridge.log proves ReShade "
+                  "loaded the add-on and the contract ran.")
+        else:
+            d.add(BAD, "ReShade.log does not exist, so ReShade never loaded.",
+                  "The game has not been run since installing, or the proxy "
+                  "DLL is not being loaded - try renaming dxgi.dll to "
+                  "d3d11.dll.")
+            d.verdict = BAD
+            d.summary = ("ReShade never loaded. Run the game once, then check "
+                         "again.")
+            return d
+        text = ""
+    else:
+        text = _tail(rlog)
 
     m = re.search(r"Initializing crosire's ReShade version '([\d.]+)'", text)
     if m:
@@ -98,7 +156,9 @@ def diagnose(game_dir: Path, route: str | None = None) -> Diagnosis:
     if re.search(r"Registered add-on \"DLSS 5 Neural Rendering\"", text):
         v = re.search(r"Registered add-on \"DLSS 5 Neural Rendering\" (v[\d.]+)", text)
         d.add(OK, f"The DLSS 5 add-on registered{' ' + v.group(1) if v else ''}.")
-    else:
+    elif not bridge.get("frames"):
+        # Delivered frames prove the add-on loaded, whatever ReShade.log says
+        # (or does not say, when the file is absent entirely).
         d.add(BAD, "The DLSS 5 add-on never registered.",
               "renodx-dlss5.addon64 is missing, or AddonPath is not set in "
               "ReShade.ini, or this is a ReShade build without add-on support.")
@@ -129,6 +189,30 @@ def diagnose(game_dir: Path, route: str | None = None) -> Diagnosis:
     if "signed NR runtime (nvngx_dlssnr.dll) pre-loaded" in text:
         d.add(OK, "nvngx_dlssnr.dll was pre-loaded at device init.")
 
+    # ------------------------------------------------ dlss5-bridge.log
+    # On the bridge route this is the decisive evidence, and it must be read
+    # BEFORE the game's own log, because it explains the NGX errors there.
+    if bridge:
+        if bridge.get("frames"):
+            det = f"{bridge['frames']:,} frames delivered"
+            if bridge.get("resolution"):
+                det += f" at {bridge['resolution']}"
+            extra = ""
+            if bridge.get("cpu_ms") is not None:
+                extra = (f"The bridge costs {bridge['cpu_ms']:.2f} ms/frame, "
+                         f"about {bridge.get('frame_share', '?')}% of the "
+                         f"frame.")
+            d.add(OK, f"The bridge is working: {det}.", extra)
+        elif bridge.get("version"):
+            d.add(WARN, f"dlss5-bridge {bridge['version']} attached but "
+                        f"delivered no frames.",
+                  "Neural rendering may still be switched off in the overlay "
+                  "(F6), or the game was closed before a frame was produced.")
+    elif route == "bridge":
+        d.add(WARN, "dlss5-bridge.log does not exist.",
+              "The bridge add-on never ran. Check that "
+              "dlss5-bridge.addon64 is in the game folder.")
+
     # -------------------------------------------------- the game's own log
     for cand in (root / "Game.log", root.parent / "Game.log"):
         if not cand.is_file():
@@ -136,13 +220,30 @@ def diagnose(game_dir: Path, route: str | None = None) -> Diagnosis:
         gtext = _tail(cand, 1_000_000)
         for m in _NGX_FAIL.finditer(gtext):
             fn, code = m.group(1), m.group(2)
+            # A game whose own DLSS call fails while the bridge is delivering
+            # frames is NORMAL: the bridge takes the contract over, so the
+            # game's direct attempt is expected to be refused. Measured on
+            # Crysis 3 Remastered 2026-09-01: the game logged
+            # NVSDK_NGX_D3D11_CreateFeature ... 0xbad00002 three seconds after
+            # the bridge attached, and the bridge then delivered 12,600
+            # frames. Reporting that as a failure sends the user chasing a
+            # problem that does not exist.
+            line_ts = _seconds(gtext[max(0, m.start() - 40):m.start() + 40])
+            after_bridge = (bridge.get("attached_at") is not None
+                            and line_ts is not None
+                            and line_ts >= bridge["attached_at"])
+            if bridge.get("frames") and (after_bridge or line_ts is None):
+                d.add(OK,
+                      f"The game's own {fn} was refused ({code}), which is "
+                      f"expected: the bridge has taken the DLSS contract over.",
+                      "This line is the hand-over, not a fault. The frame "
+                      "counter above is what says whether it works.")
+                continue
             hint = ""
-            if code.lower() in ("0xbad00005", "0xbad00004"):
-                hint = ("NVSDK_NGX_Result_FAIL_FeatureNotSupported / "
-                        "InvalidParameter: the runtime refused to create the "
-                        "feature. On a D3D11 game this normally means the "
-                        "D3D12-only add-on is installed and the bridge is "
-                        "what is actually needed.")
+            if code.lower() in ("0xbad00005", "0xbad00004", "0xbad00002"):
+                hint = ("The runtime refused to create the feature. On a D3D11 "
+                        "game this normally means the D3D12-only add-on is "
+                        "installed and the bridge is what is actually needed.")
             d.add(BAD, f"The game itself reports: {fn} failed with {code}.", hint)
         break
 
@@ -181,12 +282,21 @@ def diagnose(game_dir: Path, route: str | None = None) -> Diagnosis:
     if bad:
         d.verdict = BAD
         d.summary = bad[0].text
+    elif bridge.get("frames"):
+        # Frames delivered is the strongest evidence there is: it means the
+        # contract was created AND is running, not merely that things loaded.
+        d.verdict = OK
+        d.summary = (f"Working. The bridge delivered {bridge['frames']:,} "
+                     f"frames"
+                     + (f" at {bridge['resolution']}" if bridge.get("resolution")
+                        else "")
+                     + ". Neural rendering is on and running.")
     elif ok:
         d.verdict = OK
         d.summary = ("Everything the logs can show is in order. If the picture "
                      "still looks unchanged, make sure neural rendering is "
                      "turned ON in the add-on's overlay - it is off by "
-                     "default.")
+                     "default (F6).")
     else:
         d.verdict = UNKNOWN
         d.summary = "The logs do not say enough. Run the game once and retry."

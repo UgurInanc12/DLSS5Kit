@@ -162,36 +162,19 @@ class App:
         self.gen_box.bind("<<ComboboxSelected>>", lambda _: self._on_gen())
         self.gen_note = self._label(gpu_row, "", fg=MUTED, font=FONT_S)
         self.gen_note.pack(side="left")
-        self._button(gpu_row, "Build support...", self.show_matrix).pack(
-            side="right")
 
-        # --- controls: route and tuning ---
+        # --- controls: route ---
         ctl = tk.Frame(self.root, bg=BG)
         ctl.pack(fill="x", padx=18, pady=(0, 8))
         self._label(ctl, "Route", fg=MUTED).pack(side="left", padx=(0, 6))
         self.route_var = tk.StringVar()
         self.route_box = ttk.Combobox(ctl, textvariable=self.route_var,
-                                      state="disabled", width=32, font=FONT,
+                                      state="disabled", width=40, font=FONT,
                                       style="Dark.TCombobox")
-        self.route_box.pack(side="left", padx=(0, 16))
+        self.route_box.pack(side="left")
         self.route_box.bind("<<ComboboxSelected>>", lambda _: self._refresh_route())
-
-        self._label(ctl, "Work area", fg=MUTED).pack(side="left", padx=(0, 6))
-        self.work_var = tk.IntVar(value=100)
-        self.work_scale = tk.Scale(ctl, from_=50, to=100, orient="horizontal",
-                                   variable=self.work_var, bg=BG, fg=FG,
-                                   troughcolor=PANEL2, highlightthickness=0,
-                                   bd=0, length=140, showvalue=True,
-                                   font=FONT_S, sliderrelief="flat",
-                                   activebackground=ACCENT, state="disabled")
-        self.work_scale.pack(side="left", padx=(0, 16))
-
-        self.keep_dlss = tk.BooleanVar(value=True)
-        tk.Checkbutton(ctl, text="Keep the game's own nvngx_dlss.dll",
-                       variable=self.keep_dlss, bg=BG, fg=MUTED,
-                       selectcolor=PANEL2, activebackground=BG,
-                       activeforeground=FG, font=FONT, bd=0,
-                       highlightthickness=0).pack(side="left")
+        self.route_note = self._label(ctl, "", fg=MUTED, font=FONT_S)
+        self.route_note.pack(side="left", padx=(10, 0))
 
         # --- action row ---
         act = tk.Frame(self.root, bg=BG)
@@ -209,10 +192,12 @@ class App:
         self.b_open.pack(side="left")
         self.b_open.configure(state="disabled")
 
-        self.pbar = ttk.Progressbar(act, mode="determinate", length=200)
-        self.pbar.pack(side="right")
-        self.p_text = self._label(act, "", fg=MUTED)
-        self.p_text.pack(side="right", padx=(0, 10))
+        # A determinate progress bar was here and it lied: the steps are not
+        # equal in size (a 165 MB download and an ini write are one step
+        # each), so the fraction meant nothing. A plain status line saying
+        # what is happening right now is honest and more useful.
+        self.p_text = self._label(act, "", fg=MUTED, font=FONT_S)
+        self.p_text.pack(side="right")
 
         # --- log ---
         logf = tk.Frame(self.root, bg=PANEL)
@@ -251,11 +236,8 @@ class App:
                 if kind == "log":
                     self.say(*payload)
                 elif kind == "prog":
-                    pct, txt = payload
-                    self.pbar["value"] = pct
-                    self.p_text.configure(text=txt[:48])
-                elif kind == "matrix":
-                    self._show_matrix_window(payload)
+                    _, txt = payload
+                    self.p_text.configure(text=txt[:60])
                 elif kind == "done":
                     self._finish(payload)
         except queue.Empty:
@@ -291,71 +273,6 @@ class App:
             self._show_verdict()
             self.b_install.configure(
                 state="normal" if self.plan.supported else "disabled")
-
-    def show_matrix(self) -> None:
-        """Download each dlssnr build and report which cards it supports."""
-        if self.busy:
-            return
-        self.say("")
-        self.say("--- reading CUDA architectures out of every build "
-                 "(downloads on first use)", "muted")
-
-        def work():
-            import zipfile
-            from . import sources
-            rows = []
-            cat = sources.rhi_catalog()
-            for e in cat["dlssnr"]:
-                z = sources.download(
-                    e["url"], f"dlssnr-{e['label']}.zip",
-                    progress=lambda p, t: self.q.put(("prog", (p, t))))
-                out = sources.CACHE / f"scan-dlssnr-{e['label']}.dll"
-                if not out.is_file():
-                    with zipfile.ZipFile(z) as zf:
-                        name = [n for n in zf.namelist()
-                                if n.endswith(installer.DLSSNR)][0]
-                        out.write_bytes(zf.read(name))
-                rows.append((e["label"], gpu.dll_architectures(out)))
-            self.q.put(("matrix", rows))
-            return rows
-
-        self._run(work)
-
-    def _show_matrix_window(self, rows) -> None:
-        w = tk.Toplevel(self.root)
-        w.title("Which build supports which card")
-        w.configure(bg=BG)
-        w.geometry("640x360")
-        tk.Label(w, text="nvngx_dlssnr builds", font=FONT_B, fg=FG,
-                 bg=BG).pack(anchor="w", padx=16, pady=(14, 2))
-        tk.Label(w, text="Read from the CUDA fatbin records inside each file, "
-                         "not from a hard-coded table.",
-                 font=FONT_S, fg=MUTED, bg=BG, wraplength=600,
-                 justify="left").pack(anchor="w", padx=16, pady=(0, 10))
-
-        grid = tk.Frame(w, bg=PANEL)
-        grid.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        mine = self.card().generation
-        headers = ["build"] + list(gpu.GENERATIONS)
-        for c, h in enumerate(headers):
-            tk.Label(grid, text=h, font=FONT_B,
-                     fg=ACCENT if h == mine else MUTED, bg=PANEL,
-                     anchor="w" if c == 0 else "center").grid(
-                row=0, column=c, sticky="ew", padx=10, pady=(10, 6))
-        for c in range(len(headers)):
-            grid.columnconfigure(c, weight=2 if c == 0 else 1)
-        for r, (label, archs) in enumerate(rows, start=1):
-            tk.Label(grid, text=label, font=FONT_M, fg=FG, bg=PANEL,
-                     anchor="w").grid(row=r, column=0, sticky="ew", padx=10,
-                                      pady=3)
-            gens = archs.generations()
-            for c, g in enumerate(gpu.GENERATIONS, start=1):
-                yes = gens[g]
-                tk.Label(grid, text="yes" if yes else "-", font=FONT_B,
-                         fg=(OK if yes else MUTED), bg=PANEL).grid(
-                    row=r, column=c, pady=3)
-        tk.Label(w, text=f"Your card: {self.card().describe()}", font=FONT_S,
-                 fg=MUTED, bg=BG).pack(anchor="w", padx=16, pady=(0, 12))
 
     # -------------------------------------------------------------- input
 
@@ -456,8 +373,13 @@ class App:
 
     def _refresh_route(self) -> None:
         route = self._selected_route()
-        self.work_scale.configure(
-            state="normal" if route == routes.FEEDER else "disabled")
+        note = {
+            routes.NATIVE: "cheapest; the game's own DLSS quality mode still applies",
+            routes.BRIDGE: "private D3D12 session; quality mode still applies",
+            routes.FEEDER: "always DLAA, never upscaling - costs frame rate",
+        }.get(route, "")
+        self.route_note.configure(text=note,
+                                  fg=WARN if route == routes.FEEDER else MUTED)
 
     # ------------------------------------------------------------- action
 
@@ -487,9 +409,7 @@ class App:
         opt = installer.Options(
             route=route,
             provider=3,
-            keep_game_dlss=self.keep_dlss.get(),
             card=card,
-            work_resolution=int(self.work_var.get()),
         )
         self._run(lambda: installer.install(
             self.game_dir, self.exe, self.api, self.bits, self.plan, opt,
@@ -525,7 +445,7 @@ class App:
         self.busy = True
         for b in (self.b_install, self.b_remove):
             b.configure(state="disabled")
-        self.pbar["value"] = 0
+        self.p_text.configure(text="working...")
 
         def worker():
             try:
@@ -541,7 +461,6 @@ class App:
     def _finish(self, payload) -> None:
         kind, result = payload
         self.busy = False
-        self.pbar["value"] = 100 if kind == "ok" else 0
         self.p_text.configure(text="")
         if self.game_dir:
             self._show_facts()

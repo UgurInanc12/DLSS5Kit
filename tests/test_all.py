@@ -276,7 +276,7 @@ def _install_bridge(game: Path, local: Path, setup: Path):
     api = peinfo.ApiInfo(api=peinfo.DX11, ngx_d3d11=True, confidence="high")
     plan = routes.choose(game, api, 64)
     opt = installer.Options(route=routes.BRIDGE, local_dir=local,
-                            reshade_setup=setup, keep_game_dlss=False, card=TEST_CARD)
+                            reshade_setup=setup, card=TEST_CARD)
     return installer.install(game, exe, api, 64, plan, opt), plan, api
 
 
@@ -672,74 +672,6 @@ def test_generation_blocks_install():
         check("RTX 20 is accepted", ok.supported is True)
 
 
-def test_stray_dlss_runtime_is_replaced():
-    """A loose nvngx_dlss.dll in a game that never calls NGX is not the game's.
-
-    Keeping it would pin an unknown build in place and record it as the
-    game's own, so uninstall would restore somebody's leftover rather than
-    removing it.
-
-    Runs on the BRIDGE route deliberately: the feeder route downloads shader
-    headers and LumeniteFX, and these tests must stay offline.
-    """
-    print("\n[a stray nvngx_dlss.dll is not treated as the game's own]")
-    with tempfile.TemporaryDirectory() as td:
-        base = Path(td)
-        game = base / "game"
-        game.mkdir()
-        # No NGX strings at all: this game predates DLSS.
-        make_pe(game / "Game.exe", peinfo.PE_X64, extra=b"d3d11.dll\0")
-        (game / installer.DLSS).write_bytes(b"SOMEBODY ELSES LEFTOVER")
-        local = build_local(base / "local")
-        setup = make_reshade_setup(base / "setup.exe")
-
-        exe = game / "Game.exe"
-        api = peinfo.detect_api(exe, None)
-        check("the exe uses no NGX", api.uses_ngx is False)
-        plan = routes.choose(game, api, 64)
-        check("routed to feeder by default", plan.route == routes.FEEDER,
-              plan.route)
-
-        opt = installer.Options(route=routes.BRIDGE, local_dir=local,
-                                reshade_setup=setup, keep_game_dlss=True, card=TEST_CARD)
-        try:
-            rep = installer.install(game, exe, api, 64, plan, opt)
-        except Exception as e:
-            check("install ran", False, str(e))
-            return
-        check("the stray runtime was replaced, not kept",
-              installer.DLSS not in rep.skipped, str(rep.skipped))
-        check("it is recorded as ours", installer.DLSS in rep.written)
-        check("the replacement really happened",
-              (game / installer.DLSS).read_bytes() != b"SOMEBODY ELSES LEFTOVER")
-        check("the original was backed up",
-              (game / (installer.DLSS + installer.BACKUP_SUFFIX)).is_file())
-
-        installer.uninstall(game)
-        check("uninstall puts the original back",
-              (game / installer.DLSS).read_bytes() == b"SOMEBODY ELSES LEFTOVER")
-
-        # And the opposite: a game that DOES call NGX keeps its own runtime.
-        game2 = base / "game2"
-        game2.mkdir()
-        make_pe(game2 / "Game.exe", peinfo.PE_X64,
-                extra=b"d3d11.dll\0NVSDK_NGX_D3D11_CreateFeature\0")
-        (game2 / installer.DLSS).write_bytes(b"THE GAMES REAL RUNTIME")
-        exe2 = game2 / "Game.exe"
-        api2 = peinfo.detect_api(exe2, None)
-        check("the second exe does use NGX", api2.uses_ngx is True)
-        plan2 = routes.choose(game2, api2, 64)
-        rep2 = installer.install(game2, exe2, api2, 64, plan2,
-                                 installer.Options(route=routes.BRIDGE,
-                                                   local_dir=local,
-                                                   reshade_setup=setup,
-                                                   keep_game_dlss=True, card=TEST_CARD))
-        check("a real game's runtime is left alone",
-              installer.DLSS in rep2.skipped, str(rep2.skipped))
-        check("and it is untouched on disk",
-              (game2 / installer.DLSS).read_bytes() == b"THE GAMES REAL RUNTIME")
-
-
 def test_bridge_private_device_does_not_flip_the_verdict():
     """Our own bridge creates a D3D12 device; that is not the game doing it.
 
@@ -845,6 +777,220 @@ def test_uppercase_module_names_and_ngx_evidence():
               any("ReShade.log" in w for w in plan.warnings), str(plan.warnings))
 
 
+def test_dlss_runtime_is_always_updated():
+    """The game's nvngx_dlss.dll is always refreshed, and always backed up.
+
+    Games ship whatever DLSS build they were released with - Metro Exodus
+    Enhanced Edition carries a 13.8 MB runtime from 2021 - and leaving that
+    in place runs the neural pass against a years-old library. So the runtime
+    is replaced unconditionally, with the original preserved so Remove can
+    put the game back exactly as it was.
+
+    Runs on the BRIDGE route deliberately: the feeder route downloads shader
+    headers and LumeniteFX, and these tests must stay offline.
+    """
+    print("\n[the DLSS runtime is always updated, never left stale]")
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        local = build_local(base / "local")
+        setup = make_reshade_setup(base / "setup.exe")
+
+        # Case 1: a game that never calls NGX; the file is somebody's leftover.
+        game = base / "game"
+        game.mkdir()
+        make_pe(game / "Game.exe", peinfo.PE_X64, extra=b"d3d11.dll\0")
+        (game / installer.DLSS).write_bytes(b"SOMEBODY ELSES LEFTOVER")
+        exe = game / "Game.exe"
+        api = peinfo.detect_api(exe, None)
+        check("the exe uses no NGX", api.uses_ngx is False)
+        check("routed to feeder by default",
+              routes.choose(game, api, 64).route == routes.FEEDER)
+
+        plan = routes.choose(game, api, 64)
+        rep = installer.install(game, exe, api, 64, plan,
+                                installer.Options(route=routes.BRIDGE,
+                                                  local_dir=local,
+                                                  reshade_setup=setup,
+                                                  card=TEST_CARD))
+        check("the stray runtime was replaced",
+              installer.DLSS not in rep.skipped, str(rep.skipped))
+        check("the replacement really happened",
+              (game / installer.DLSS).read_bytes() != b"SOMEBODY ELSES LEFTOVER")
+        check("the original was backed up",
+              (game / (installer.DLSS + installer.BACKUP_SUFFIX)).is_file())
+        installer.uninstall(game)
+        check("uninstall puts the original back",
+              (game / installer.DLSS).read_bytes() == b"SOMEBODY ELSES LEFTOVER")
+
+        # Case 2: a game that DOES call NGX. Its runtime is updated too - that
+        # is the whole point - but preserved so it can be restored.
+        game2 = base / "game2"
+        game2.mkdir()
+        make_pe(game2 / "Game.exe", peinfo.PE_X64,
+                extra=b"d3d11.dll\0NVSDK_NGX_D3D11_CreateFeature\0")
+        (game2 / installer.DLSS).write_bytes(b"THE GAMES OLD 2021 RUNTIME")
+        exe2 = game2 / "Game.exe"
+        api2 = peinfo.detect_api(exe2, None)
+        check("the second exe does use NGX", api2.uses_ngx is True)
+        before = snapshot(game2)
+
+        rep2 = installer.install(game2, exe2, api2, 64,
+                                 routes.choose(game2, api2, 64),
+                                 installer.Options(route=routes.BRIDGE,
+                                                   local_dir=local,
+                                                   reshade_setup=setup,
+                                                   card=TEST_CARD))
+        check("a real game's runtime is updated, not skipped",
+              installer.DLSS not in rep2.skipped, str(rep2.skipped))
+        check("it now holds the new build",
+              (game2 / installer.DLSS).read_bytes() != b"THE GAMES OLD 2021 RUNTIME")
+        check("the game's original was backed up",
+              (game2 / (installer.DLSS + installer.BACKUP_SUFFIX)).read_bytes()
+              == b"THE GAMES OLD 2021 RUNTIME")
+        check("and the log says it was updated",
+              any("updating the game's own" in n or "backed up" in n
+                  for n in rep2.notes), str(rep2.notes))
+
+        installer.uninstall(game2)
+        check("Remove restores the game's original runtime exactly",
+              snapshot(game2) == before,
+              f"diff: {set(snapshot(game2)) ^ set(before)}")
+
+
+def test_bridge_log_is_read_and_ngx_errors_get_context():
+    """dlss5-bridge.log is the ground truth on the bridge route.
+
+    Two real reports drove this. Measured on Crysis 3 Remastered 2026-09-01:
+
+      05:40:52  installed
+      05:44:37  dlss5-bridge 1.3.0 attached
+      05:44:40  game logs NVSDK_NGX_D3D11_CreateFeature ... 0xbad00002
+      05:44-53  bridge delivers 12,600 frames at 1.23 ms/frame
+
+    The old diagnoser read only the game's log, saw the 0xbad00002 line, and
+    returned BAD for an install that was working perfectly. The error is the
+    hand-over: the bridge took the contract, so the game's own direct call is
+    expected to be refused.
+    """
+    print("\n[the bridge log is read, and NGX errors get their context]")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "ReShade.log").write_text(
+            "INFO | Initializing crosire's ReShade version '6.8.0.2155'\n"
+            "INFO | Redirecting D3D11CreateDeviceAndSwapChain(...)\n"
+            'INFO | Registered add-on "DLSS 5 Neural Rendering" v0.1\n',
+            encoding="utf8")
+        (d / "dlss5-bridge.log").write_text(
+            "05:44:37.188  dlss5-bridge 1.3.0 (built Aug 31 2026) attached.\n"
+            "05:53:03.752  [bridge] frame 12600 delivered (864x486)\n"
+            "05:53:03.752  [bridge] 600 frames: bridge CPU 1.23 ms/frame | "
+            "frame interval 39.55 ms (25.3 fps) | spread 36.48-45.06 ms | "
+            "bridge is 3% of the frame | d3d12 25203/25206\n"
+            "05:53:18.207  shut down cleanly.\n", encoding="utf8")
+        (d / "Game.log").write_text(
+            "<05:44:40> Failed to NVSDK_NGX_D3D11_CreateFeature of "
+            "NVSDK_NGX_Feature_SuperSampling,  dlaa = 0xbad00002\n",
+            encoding="utf8")
+
+        r = diagnose.diagnose(d, route="bridge")
+        check("verdict is OK, not BAD", r.verdict == diagnose.OK,
+              f"{r.verdict}: {r.summary}")
+        check("the frame count is in the summary", "12,600" in r.summary,
+              r.summary)
+        check("the bridge finding reports the cost",
+              any("1.23 ms/frame" in f.evidence for f in r.findings),
+              str([f.evidence for f in r.findings]))
+        handover = [f for f in r.findings if "hand-over" in f.evidence
+                    or "taken the DLSS contract over" in f.text]
+        check("the NGX refusal is explained as a hand-over", handover)
+        check("and it is not marked bad",
+              all(f.level != diagnose.BAD for f in handover), str(handover))
+
+        # Without the bridge log the same NGX line IS a real failure.
+        (d / "dlss5-bridge.log").unlink()
+        r2 = diagnose.diagnose(d, route="bridge")
+        check("with no bridge log the NGX error is a fault",
+              r2.verdict == diagnose.BAD, f"{r2.verdict}: {r2.summary}")
+        check("and the missing bridge log is reported",
+              any("dlss5-bridge.log does not exist" in f.text
+                  for f in r2.findings))
+
+    # A missing ReShade.log is not fatal when the bridge proves frames ran.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "dlss5-bridge.log").write_text(
+            "05:44:37.188  dlss5-bridge 1.3.0 attached.\n"
+            "05:53:03.752  [bridge] frame 9000 delivered (1920x1080)\n",
+            encoding="utf8")
+        r = diagnose.diagnose(d, route="bridge")
+        check("frames outrank a missing ReShade.log",
+              r.verdict == diagnose.OK, f"{r.verdict}: {r.summary}")
+        check("the summary says it works", "9,000" in r.summary, r.summary)
+
+
+def test_renderer_in_a_neighbour_dll():
+    """Engines that keep the renderer out of the executable.
+
+    Measured on this workstation 2026-09-01: PlagueIncEvolved.exe and
+    Bills Must Be Paid.exe are 0.7 MB launchers whose renderer lives in
+    UnityPlayer.dll, and Battlefield 6 ships
+    Engine.Render.Core2.PlatformPcDx12.retail.dll. Scanning the executable
+    alone reported "no graphics API could be identified" for all three.
+
+    The trap this also pins: a general-purpose engine module contains EVERY
+    backend, so presence proves nothing. PlagueInc's UnityPlayer.dll holds
+    d3d11 x79, d3d12 x103 and vulkan-1 x1; an early "any vulkan means Vulkan"
+    rule reported Vulkan for a game that runs D3D11 by default.
+    """
+    print("\n[the renderer can live in a neighbouring DLL]")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+
+        # A module whose file name states the API.
+        (d / "Engine.Render.Core2.PlatformPcDx12.retail.dll").write_bytes(b"x")
+        api, why = peinfo.api_from_neighbour_dlls(d)
+        check("a *Dx12*.dll neighbour means DX12", api == peinfo.DX12,
+              f"{api} / {why}")
+        check("and it names the module", "dx12" in why.lower(), why)
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        # The Unity shape: every backend present, Direct3D dominant.
+        (d / "UnityPlayer.dll").write_bytes(
+            b"d3d11.dll\0" * 8 + b"d3d12.dll\0" * 3 + b"dxgi.dll\0" * 5
+            + b"vulkan-1.dll\0")
+        api, why = peinfo.api_from_neighbour_dlls(d)
+        check("Unity with every backend is read as Direct3D",
+              api == peinfo.DX11, f"{api} / {why}")
+        check("the reason admits it is a default, not proof",
+              "default" in why, why)
+
+        # And the executable-level detection picks it up.
+        exe = make_pe(d / "Game.exe", peinfo.PE_X64, extra=b"nothing useful")
+        info = peinfo.detect_api(exe, d)
+        check("detect_api falls through to the neighbours",
+              info.api == peinfo.DX11, f"{info.api} / {info.reason}")
+        check("confidence is medium, not high", info.confidence == "medium",
+              info.confidence)
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        # A genuinely Vulkan-only engine module.
+        (d / "UnityPlayer.dll").write_bytes(b"vulkan-1.dll\0" * 6)
+        api, why = peinfo.api_from_neighbour_dlls(d)
+        check("a Vulkan-only module is read as Vulkan", api == peinfo.VULKAN,
+              f"{api} / {why}")
+
+    # Launcher and updater executables are not the game.
+    for name in ("gaijin_downloader.exe", "GameUpdater.exe", "JiraBugTrap.exe",
+                 "Patcher.exe", "CrashReporter.exe"):
+        check(f"{name} is not treated as the game",
+              not peinfo.looks_like_game(Path(name)))
+    for name in ("aces.exe", "MetroExodus.exe", "BatmanAK.exe"):
+        check(f"{name} still counts as a game",
+              peinfo.looks_like_game(Path(name)))
+
+
 def main() -> int:
     print("DLSS5Kit offline tests")
     test_ini()
@@ -854,11 +1000,12 @@ def main() -> int:
     test_api_detection_from_strings()
     test_api_from_log_wins()
     test_uppercase_module_names_and_ngx_evidence()
+    test_renderer_in_a_neighbour_dll()
     test_bridge_private_device_does_not_flip_the_verdict()
     test_generations_and_ptx()
     test_native_dlss_veto()
     test_generation_blocks_install()
-    test_stray_dlss_runtime_is_replaced()
+    test_dlss_runtime_is_always_updated()
     test_routing()
     test_zip_extraction()
     test_install_uninstall_round_trip()
@@ -869,6 +1016,7 @@ def main() -> int:
     test_anticheat_warning()
     test_manifest_survives_failure()
     test_diagnose()
+    test_bridge_log_is_read_and_ngx_errors_get_context()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
