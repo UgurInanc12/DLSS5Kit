@@ -232,13 +232,40 @@ worse, because ESET then flags its packer signature.
 `DLSS5Kit.exe` from inside it. Keep the folder together - the exe needs the
 files next to it.
 
-The published v1.7.0 zip was scanned after release and came back **0/60,
-no engine flagging it, Microsoft and ESET both clean**. Heuristic hits can
-still reappear on a future build, since these are reputation systems and this
-executable is unsigned; a code-signing certificate is the only permanent
-answer and it costs money without changing any behaviour. Here is what drives
-the detections when they do appear, and how to verify the tool yourself
-rather than taking anyone's word for it.
+The published v1.7.0 zip scans **0/60**. The extracted `DLSS5Kit.exe` on its
+own is still flagged by **Microsoft alone (1/69, `Trojan:Win32/Wacatac.B!ml`)**,
+and that last one is not caused by anything in this project. Proof, measured
+on VirusTotal:
+
+> A control executable built with the same PyInstaller version, whose entire
+> source code is `print("hello")`, gets the **identical** verdict
+> (3/70, Microsoft `Trojan:Win32/Wacatac.B!ml`). It contains none of this
+> project's code.
+
+VirusTotal itself labels the cause, via a crowdsourced YARA rule on the file:
+*"Identifies executable converted using PyInstaller. This rule by itself does
+NOT necessarily mean the detected file is malicious."*
+
+Things that were tried and measured, so nobody has to guess:
+
+| Attempt | Result |
+|---|---|
+| Add a full version resource | 6/70 -> 3-4/70, removed the injector-behaviour flag |
+| Ship a folder instead of a one-file exe | -> 2/70 launcher, **0/60 zip** |
+| Compile a private PyInstaller bootloader from source | **no improvement** (2/69, Microsoft unchanged) |
+| Nuitka instead of PyInstaller | 2/70, ESET flags its packer instead |
+
+The `!ml` suffix is Microsoft's own marker for a machine-learning guess, and
+it behaves like one: two binaries from the same commit have scored
+differently. A locally installed, fully updated Defender reports **no threats**
+on the same files (`MpCmdRun.exe -Scan -ScanType 3 -File DLSS5Kit.exe`), so
+this is the cloud model, not a signature.
+
+A false-positive report has been filed with Microsoft; see
+[docs/antivirus-false-positive-submission.md](docs/antivirus-false-positive-submission.md).
+The only permanent fix is a code-signing certificate, which costs money and
+changes no behaviour. Here is what drives the detections, and how to verify
+the tool yourself rather than taking anyone's word for it.
 
 **Why it happens**
 
