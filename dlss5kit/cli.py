@@ -140,6 +140,17 @@ def _print_inspection(game_dir: Path, exe: Path, cands: list[Path],
     print(f"Executable  : {exe.name}"
           + (f"   ({len(cands)} candidates)" if len(cands) > 1 else ""))
     print(f"Architecture: {bits}-bit")
+    # On an RTX Remix title the main executable is a thin 32-bit shell; the
+    # renderer lives in a separate 64-bit process, so reporting only the
+    # shell's properties reads as "the tool did not look properly".
+    bridge = peinfo.remix_bridge(game_dir)
+    if bridge is not None:
+        try:
+            bbits = peinfo.exe_bitness(bridge)
+        except peinfo.PEError:
+            bbits = 64
+        print(f"              RTX Remix: rendering runs in {bridge.name} "
+              f"({bbits}-bit), renderer bin\\.trex\\d3d9.dll (Vulkan)")
     print(f"Graphics API: {api.api}  [{api.confidence} confidence]")
     print(f"              {api.reason}")
     ngx = [n for n, on in (("D3D11", api.ngx_d3d11), ("D3D12", api.ngx_d3d12),

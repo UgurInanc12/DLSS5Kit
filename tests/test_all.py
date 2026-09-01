@@ -1107,6 +1107,54 @@ def test_kit_addon_step():
         check("it is the addon64", found.name == inst.KIT_ADDON)
 
 
+def test_engine_tools_and_rtx_remix():
+    """Half-Life 2 RTX, 2026-09-02: two real defects found by running the tool.
+
+    1. bin/ scores +200, and Source keeps its map compilers there, so
+       studiomdl_modified.exe (1.8 MB) outscored the real hl2.exe in the
+       root and --check reported a map compiler as "the game".
+    2. The plain "32-bit, not supported" verdict is misleading for RTX Remix:
+       hl2.exe is 32-bit but rendering happens in a separate 64-bit process,
+       and the renderer (bin/.trex/d3d9.dll, dxvk-remix) references
+       NVSDK_NGX_VULKAN 43 times and D3D12 zero times.
+    """
+    print("\n[engine tools and rtx remix]")
+    game = Path(r"D:\Games\Steam\steamapps\common\Half-Life 2 RTX")
+    if not game.is_dir():
+        print("  (skipped: Half-Life 2 RTX not installed)")
+        return
+
+    exes = peinfo.find_game_exes(game)
+    check("hl2.exe wins over the bin/ tools",
+          exes and exes[0].name.lower() == "hl2.exe",
+          exes[0].name if exes else "none")
+    tools = {"studiomdl", "studiomdl_modified", "vbsp", "vrad", "vvis",
+             "hammer", "propper"}
+    check("no map compiler is offered as a candidate",
+          not any(p.stem.lower() in tools for p in exes),
+          str([p.name for p in exes if p.stem.lower() in tools][:3]))
+
+    bridge = peinfo.remix_bridge(game)
+    check("the Remix bridge is found", bridge is not None and bridge.is_file())
+    if bridge:
+        check("and it is 64-bit", peinfo.exe_bitness(bridge) == 64)
+
+    exe, _ = peinfo.resolve_target(game)
+    api = peinfo.detect_api(exe, game)
+    plan = routes.choose(game, api, peinfo.exe_bitness(exe), card=TEST_CARD)
+    check("still refused", plan.supported is False)
+    check("but the reason names RTX Remix", "RTX Remix" in plan.blocker,
+          plan.blocker[:60])
+    check("and does not just say 32-bit",
+          "32-bit games are not supported" not in plan.blocker)
+
+    # A folder with no bridge must keep the plain 32-bit message.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        check("plain 32-bit message survives elsewhere",
+              peinfo.remix_bridge(d) is None)
+
+
 def main() -> int:
     print("DLSS5Kit offline tests")
     test_ini()
@@ -1120,6 +1168,7 @@ def main() -> int:
     test_presets_module()
     test_runtime_report()
     test_kit_addon_step()
+    test_engine_tools_and_rtx_remix()
     test_bridge_private_device_does_not_flip_the_verdict()
     test_generations_and_ptx()
     test_native_dlss_veto()

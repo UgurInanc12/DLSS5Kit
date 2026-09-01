@@ -61,6 +61,16 @@ _PRUNE_DIRS = {
 }
 _MAX_DEPTH = 5
 
+# Engine SDK tools that ship inside a game install and are not the game.
+# Source engine puts its map compilers in bin/, which the bin/ score bonus
+# would otherwise promote above the real executable (Half-Life 2 RTX, 2026-09).
+_ENGINE_TOOLS = {
+    "studiomdl", "studiomdl_modified", "vbsp", "vbspinfo", "vrad", "vvis",
+    "hammer", "hammerplusplus", "hammer_run_map_launcher", "propper",
+    "hammerplusplus_compiler", "glview", "height2ssbump", "vtex", "vtf2tga",
+    "captioncompiler", "motionmapper", "qc_eyes", "phonemeextractor",
+}
+
 
 class PEError(Exception):
     pass
@@ -559,6 +569,29 @@ def _walk_exes(folder: Path, max_depth: int = _MAX_DEPTH) -> list[Path]:
     return found
 
 
+def remix_bridge(folder: Path) -> Path | None:
+    """The 64-bit renderer of an RTX Remix game, if this is one.
+
+    RTX Remix runs a 32-bit game process that hands rendering to a separate
+    64-bit process: bin/.trex/NvRemixBridge.exe, with the real renderer in
+    bin/.trex/d3d9.dll (a dxvk-remix build that draws with Vulkan). Measured
+    on Half-Life 2 RTX 2026-09-02: hl2.exe is 32-bit, NvRemixBridge.exe is
+    64-bit, and .trex/d3d9.dll references NVSDK_NGX_VULKAN 43 times and
+    D3D12 zero times, alongside its own nvngx_dlss/dlssd/dlssg runtimes.
+
+    This matters because judging such a game by its main executable calls it
+    "32-bit, not supported" when the process that would host an injected
+    add-on is 64-bit. It is still not installable - see route selection - but
+    the tool must say WHY correctly.
+    """
+    folder = Path(folder)
+    for rel in ("bin/.trex/NvRemixBridge.exe", ".trex/NvRemixBridge.exe"):
+        p = folder / rel
+        if p.is_file():
+            return p
+    return None
+
+
 def _score(exe: Path, folder: Path) -> float:
     try:
         rel = str(exe.relative_to(folder)).lower().replace("\\", "/")
@@ -584,6 +617,14 @@ def _score(exe: Path, folder: Path) -> float:
         s += 120
     if not looks_like_game(exe):
         s -= 1500
+
+    # Engine SDK tools that ship beside the game. Measured on Half-Life 2 RTX:
+    # bin/ holds studiomdl, vbsp, vrad, vvis, hammer and propper - Source's map
+    # compilers - and the bin/ bonus above floated them over the real hl2.exe
+    # in the root, so --check reported a 1.8 MB map compiler as "the game" and
+    # refused the install as 32-bit-only. These names are never a game.
+    if stem in _ENGINE_TOOLS:
+        s -= 1200
     try:
         mb = exe.stat().st_size / (1024 * 1024)
         s += min(mb, 300) * 1.2

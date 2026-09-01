@@ -150,6 +150,25 @@ def choose(folder: Path, api: peinfo.ApiInfo, bitness: int,
                      "the DLSS 5 add-on, the bridge, the NGX runtimes - is "
                      "64-bit only, and the cross-process helper the feeder "
                      "would need is out of scope for this tool.")
+        # RTX Remix is a special case worth naming, because the plain
+        # "32-bit" answer is misleading: the game process is 32-bit but the
+        # process that actually renders is a separate 64-bit one, and the
+        # title already ships DLSS. Users otherwise assume the tool simply
+        # failed to look properly. Measured on Half-Life 2 RTX 2026-09-02.
+        if folder is not None and peinfo.remix_bridge(folder) is not None:
+            p.blocker = (
+                "This is an RTX Remix title. The game executable is 32-bit, "
+                "but rendering happens in a separate 64-bit process "
+                "(bin\\.trex\\NvRemixBridge.exe) whose renderer "
+                "(bin\\.trex\\d3d9.dll, a dxvk-remix build) draws with "
+                "Vulkan and ships its own DLSS runtimes - it references "
+                "NVSDK_NGX_VULKAN and never D3D12.\n\n"
+                "Nothing here can be installed into that: ReShade would have "
+                "to attach to the bridge process rather than the game, the "
+                "DLSS 5 add-on only detours D3D12 NGX calls, and Remix "
+                "already performs its own path-traced rendering with DLSS "
+                "and Ray Reconstruction. Use the game's own DLSS settings "
+                "instead.")
         return p
 
     if api.api in (peinfo.DX9, peinfo.DX10):
