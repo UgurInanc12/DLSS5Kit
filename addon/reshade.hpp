@@ -10,7 +10,7 @@
 #include <charconv>
 
 // Current version of the ReShade API
-#define RESHADE_API_VERSION 20
+#define RESHADE_API_VERSION 18
 
 // Optionally import ReShade API functions when 'RESHADE_API_LIBRARY' is defined instead of using header-only mode
 #if defined(RESHADE_API_LIBRARY) || defined(RESHADE_API_LIBRARY_EXPORT)
@@ -54,7 +54,7 @@ RESHADE_API_LIBRARY_DECL void ReShadeUpdateAndPresentEffectRuntime(reshade::api:
 // Use the kernel32 variant of module enumeration functions so it can be safely called from 'DllMain'
 extern "C" BOOL WINAPI K32EnumProcessModules(HANDLE hProcess, HMODULE *lphModule, DWORD cb, LPDWORD lpcbNeeded);
 
-namespace reshade::internal
+namespace reshade { namespace internal
 {
 	/// <summary>
 	/// Gets the handle to the ReShade module.
@@ -92,7 +92,7 @@ namespace reshade::internal
 		static HMODULE handle = initial_handle;
 		return handle;
 	}
-}
+} }
 
 #endif
 
@@ -309,7 +309,7 @@ namespace reshade
 	inline void register_event(typename addon_event_traits<ev>::decl callback)
 	{
 #if defined(RESHADE_API_LIBRARY)
-		ReShadeRegisterEvent(ev, reinterpret_cast<void *>(callback));
+		ReShadeRegisterEvent(ev, static_cast<void *>(callback));
 #else
 		static const auto func = reinterpret_cast<void(*)(addon_event, void *)>(
 			GetProcAddress(internal::get_reshade_module_handle(), "ReShadeRegisterEvent"));
@@ -326,7 +326,7 @@ namespace reshade
 	inline void unregister_event(typename addon_event_traits<ev>::decl callback)
 	{
 #if defined(RESHADE_API_LIBRARY)
-		ReShadeUnregisterEvent(ev, reinterpret_cast<void *>(callback));
+		ReShadeUnregisterEvent(ev, static_cast<void *>(callback));
 #else
 		static const auto func = reinterpret_cast<void(*)(addon_event, void *)>(
 			GetProcAddress(internal::get_reshade_module_handle(), "ReShadeUnregisterEvent"));
@@ -370,7 +370,7 @@ namespace reshade
 	}
 
 	/// <summary>
-	/// Creates a new effect runtime for an existing swap chain, for when it was not already hooked by ReShade (e.g. because the RESHADE_DISABLE_GRAPHICS_HOOK environment variable is set).
+	/// Creates a new effect runtime for an existing swapchain, for when it was not already hooked by ReShade (e.g. because the RESHADE_DISABLE_GRAPHICS_HOOK environment variable is set).
 	/// </summary>
 	/// <param name="api">Underlying graphics API used.</param>
 	/// <param name="device">'IDirect3DDevice9', 'ID3D10Device', 'ID3D11Device', 'ID3D12Device', 'HGLRC' or 'VkDevice', depending on the graphics API.</param>

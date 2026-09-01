@@ -7,7 +7,7 @@
 
 #include "reshade_api_device.hpp"
 
-namespace reshade::api
+namespace reshade { namespace api
 {
 	/// <summary>
 	/// An opaque handle to a technique in an effect.
@@ -843,4 +843,4 @@ namespace reshade::api
 		/// <param name="postfix">Optional string to append to the screenshot filename, or <see langword="nullptr"/> for no postfix.</param>
 		virtual void save_screenshot(const char *postfix = nullptr) = 0;
 	};
-}
+} }

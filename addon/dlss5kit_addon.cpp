@@ -28,6 +28,33 @@
  * nvngx_dlss.dll 310.8.0): 0=default, D=4, E=5, F=6, J=10, K=11, L=12, M=13.
  */
 
+/*
+ * BUILD REQUIREMENT, LEARNED THE HARD WAY
+ * ---------------------------------------
+ * This must be built against the ReShade SDK that reports
+ * RESHADE_API_VERSION 18 (ReShade 6.6 - 6.7 headers). Measured on
+ * ReShade 6.8.0.2155 with Crysis 3 Remastered, 2026-09-01:
+ *
+ *   built with API 20 headers -> "Registered add-on ... API version 20"
+ *                                in ReShade.log, register_overlay() returns
+ *                                normally, and NO TAB IS EVER DRAWN. No
+ *                                error, no warning, no [Window][DLSS5Kit]
+ *                                section in ReShade.ini.
+ *   built with API 18 headers -> the tab appears and works.
+ *
+ * The runtime accepts the higher API version at registration (it only
+ * rejects versions it has never heard of, with an explicit "not supported"
+ * message) but does not surface overlays registered under it. The two
+ * add-ons that DO work in this stack, dlss5-bridge and renodx-dlss5, are
+ * both API 18. Do not "upgrade" the vendored headers without testing the
+ * tab in a real game first: everything else about a broken build looks
+ * healthy, including the log line saying it registered.
+ *
+ * The header set lives beside this file and is pinned to reshade v6.7.1.
+ */
+
+// The vendored headers must be the API 18 set; a mismatched upgrade is
+// silent at runtime, so it is caught here at compile time instead.
 #define ImTextureID ImU64
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -39,6 +66,12 @@
 
 #include "imgui.h"
 #include "reshade.hpp"
+
+static_assert(RESHADE_API_VERSION == 18,
+              "Build against the ReShade 6.7.x headers (API 18). Overlays "
+              "registered under API 20 never get drawn by ReShade 6.8 - the "
+              "add-on loads and registers, but the tab silently never "
+              "appears. See the comment at the top of this file.");
 
 namespace {
 
