@@ -66,6 +66,14 @@ def sha(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+# Every install test pins a card explicitly. Without this the suite depends on
+# whatever GPU the machine happens to have, and a CI runner with no NVIDIA
+# card fails the install tests for a reason that has nothing to do with the
+# code under test. RTX 30 is used because the stand-in component files carry
+# no CUDA fatbins at all, so any supported generation behaves identically.
+TEST_CARD = gpu.Card(name="Test RTX 3090", sm=86)
+
+
 def snapshot(root: Path) -> dict[str, str]:
     return {str(p.relative_to(root)).replace("\\", "/"): sha(p)
             for p in sorted(root.rglob("*")) if p.is_file()}
@@ -268,7 +276,7 @@ def _install_bridge(game: Path, local: Path, setup: Path):
     api = peinfo.ApiInfo(api=peinfo.DX11, ngx_d3d11=True, confidence="high")
     plan = routes.choose(game, api, 64)
     opt = installer.Options(route=routes.BRIDGE, local_dir=local,
-                            reshade_setup=setup, keep_game_dlss=False)
+                            reshade_setup=setup, keep_game_dlss=False, card=TEST_CARD)
     return installer.install(game, exe, api, 64, plan, opt), plan, api
 
 
@@ -370,12 +378,12 @@ def test_route_switch_cleans_up():
 
         installer.install(game, exe, api, 64, plan,
                           installer.Options(route=routes.BRIDGE, local_dir=local,
-                                            reshade_setup=setup))
+                                            reshade_setup=setup, card=TEST_CARD))
         check("bridge addon present", (game / installer.BRIDGE_ADDON).is_file())
 
         installer.install(game, exe, api, 64, plan,
                           installer.Options(route=routes.NATIVE, local_dir=local,
-                                            reshade_setup=setup))
+                                            reshade_setup=setup, card=TEST_CARD))
         check("bridge addon removed when switching to native",
               not (game / installer.BRIDGE_ADDON).is_file())
         check("manifest now says native",
@@ -484,7 +492,7 @@ def test_manifest_survives_failure():
         api = peinfo.ApiInfo(api=peinfo.DX11, ngx_d3d11=True, confidence="high")
         plan = routes.choose(game, api, 64)
         opt = installer.Options(route=routes.BRIDGE, local_dir=local,
-                                reshade_setup=setup)
+                                reshade_setup=setup, card=TEST_CARD)
         # Point the resolver at nothing so the download step fails.
         import dlss5kit.sources as S
         original = S.resolve_bridge
@@ -693,7 +701,7 @@ def test_stray_dlss_runtime_is_replaced():
               plan.route)
 
         opt = installer.Options(route=routes.BRIDGE, local_dir=local,
-                                reshade_setup=setup, keep_game_dlss=True)
+                                reshade_setup=setup, keep_game_dlss=True, card=TEST_CARD)
         try:
             rep = installer.install(game, exe, api, 64, plan, opt)
         except Exception as e:
@@ -725,7 +733,7 @@ def test_stray_dlss_runtime_is_replaced():
                                  installer.Options(route=routes.BRIDGE,
                                                    local_dir=local,
                                                    reshade_setup=setup,
-                                                   keep_game_dlss=True))
+                                                   keep_game_dlss=True, card=TEST_CARD))
         check("a real game's runtime is left alone",
               installer.DLSS in rep2.skipped, str(rep2.skipped))
         check("and it is untouched on disk",
