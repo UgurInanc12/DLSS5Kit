@@ -362,3 +362,61 @@ def build_matrix(files: dict[str, Path]) -> dict[str, dict[str, bool]]:
     """{build label: {generation: runs}} for a set of downloaded files."""
     return {name: dll_architectures(p).generations()
             for name, p in files.items()}
+
+
+def runtime_report(path: Path, sm: int | None) -> dict:
+    """What the installed neural-rendering runtime is, for this card.
+
+    Answers the question the fps complaints on Ampere come down to: does this
+    build carry NATIVE kernels for the card, or would it run through a
+    mismatch path? Also names the precision, because the leaked runtime is
+    fp8/E4M3-quantized (one weight config,
+    CC_Control_History_Blend_Quantize_With_Teacher) and cards below Ada have
+    no fp8 hardware - the community SF builds re-implement the kernels in
+    fp16 for Ampere/Turing, which is what "runs on RTX 30" actually means.
+    """
+    out = {
+        "file": str(path),
+        "size": None,
+        "native_for_card": None,
+        "cubin_sms": [],
+        "ptx_sms": [],
+        "precision": "unknown",
+        "note": "",
+    }
+    try:
+        out["size"] = path.stat().st_size
+    except OSError:
+        out["note"] = "file not found"
+        return out
+    archs = dll_architectures(path)
+    out["cubin_sms"] = sorted(archs.cubin)
+    out["ptx_sms"] = sorted(archs.ptx)
+    if sm is not None:
+        out["native_for_card"] = sm in archs.cubin
+
+    # Precision markers, read from the binary itself.
+    try:
+        import mmap
+        with open(path, "rb") as fh:
+            data = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+            fp8 = data.find(b"NGXCubinFormat_sE4M3") >= 0
+            data.close()
+    except OSError:
+        fp8 = False
+    if fp8:
+        out["precision"] = "fp8 (E4M3) quantized weights"
+        if sm is not None and sm < 89:
+            if sm in archs.cubin:
+                out["note"] = (
+                    "this build carries native kernels for your card; on "
+                    "Ampere/Turing those are the community fp16 "
+                    "re-implementations of the fp8 model (SF-family). There "
+                    "is no official fp16 runtime, and no switch to flip: the "
+                    "precision is baked into the kernels themselves.")
+            else:
+                out["note"] = (
+                    "fp8-only build with no native kernels for your card. On "
+                    "RTX 20/30 this is the 1-6 fps failure mode - install an "
+                    "SF-family build instead (Auto does this).")
+    return out

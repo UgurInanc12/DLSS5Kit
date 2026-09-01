@@ -991,6 +991,90 @@ def test_renderer_in_a_neighbour_dll():
               peinfo.looks_like_game(Path(name)))
 
 
+def test_presets_module():
+    """SR/RR preset hints: the exact NGX names, enum values, both sinks.
+
+    Verified against nvngx_dlss.dll 310.8.0 strings and the NVIDIA headers:
+    per-quality-slot names ("DLSS.Hint.Render.Preset.Quality" etc., there is
+    no single un-slotted parameter), enum J=10 K=11 L=12 M=13, RR D=4 E=5 F=6.
+    """
+    print("\n[dlss render presets]")
+    from dlss5kit import presets
+
+    check("J maps to 10", presets.PRESET_VALUES["J"] == 10)
+    check("K maps to 11", presets.PRESET_VALUES["K"] == 11)
+    check("M maps to 13", presets.PRESET_VALUES["M"] == 13)
+    check("D maps to 4", presets.PRESET_VALUES["D"] == 4)
+    check("default maps to 0", presets.PRESET_VALUES["default"] == 0)
+
+    pr = presets.Presets(sr="K", rr="E")
+    pairs = dict(presets.hint_pairs(pr))
+    check("all six SR slots written",
+          sum(1 for k in pairs if k.startswith("DLSS.Hint")) == 6, str(pairs))
+    check("all six RR slots written",
+          sum(1 for k in pairs if k.startswith("RayReconstruction")) == 6)
+    check("SR Quality slot carries K",
+          pairs["DLSS.Hint.Render.Preset.Quality"] == 11)
+    check("RR Performance slot carries E",
+          pairs["RayReconstruction.Hint.Render.Preset.Performance"] == 5)
+
+    try:
+        presets.Presets(sr="Z").validate()
+        check("bad SR letter refused", False)
+    except presets.PresetError:
+        check("bad SR letter refused", True)
+    try:
+        presets.Presets(rr="J").validate()   # J is an SR preset, not RR
+        check("SR-only letter refused for RR", False)
+    except presets.PresetError:
+        check("SR-only letter refused for RR", True)
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        # bridge sink
+        (d / config.BRIDGE_CFG).write_text("vk_mirror=1\n", encoding="utf8")
+        presets.apply_to_bridge_cfg(d, pr)
+        cfg = config.read_cfg(d / config.BRIDGE_CFG)
+        check("bridge cfg carries the hint",
+              cfg.get("DLSS.Hint.Render.Preset.Quality") == "11", str(cfg))
+        check("existing bridge keys survive", cfg.get("vk_mirror") == "1")
+
+        # native sink
+        presets.apply_to_reshade_ini(d, pr)
+        ini = config.Ini.load(d / "ReShade.ini")
+        check("ReShade.ini carries the hint",
+              ini.get("RenoDX.DLSS5", "DLSS.Hint.Render.Preset.Quality") == "11")
+
+        # read-back round trip
+        cur = presets.read_current(d)
+        check("read_current sees K/E", (cur.sr, cur.rr) == ("K", "E"),
+              f"{cur.sr}/{cur.rr}")
+
+        # setting default OVERWRITES, not skips - that is how you get back
+        presets.apply(d, "bridge", presets.Presets())
+        cfg2 = config.read_cfg(d / config.BRIDGE_CFG)
+        check("default resets the override to 0",
+              cfg2.get("DLSS.Hint.Render.Preset.Quality") == "0", str(cfg2))
+
+
+def test_runtime_report():
+    """The fp8/fp16 story, pinned to what the binaries actually contain."""
+    print("\n[nr runtime report]")
+    local = Path(r"C:\Users\uguri\Downloads\Streamline\nvngx_dlssnr.dll")
+    if not local.is_file():
+        print("  (skipped: local runtime not present)")
+        return
+    rep = gpu.runtime_report(local, 86)
+    check("sm_86 kernels present", 86 in rep["cubin_sms"], str(rep["cubin_sms"]))
+    check("reported native for RTX 30", rep["native_for_card"] is True)
+    check("precision identified as fp8", "fp8" in rep["precision"],
+          rep["precision"])
+    check("the note explains the SF fp16 story", "fp16" in rep["note"],
+          rep["note"][:80])
+    rep2 = gpu.runtime_report(Path("Z:/nowhere/nvngx_dlssnr.dll"), 86)
+    check("missing file reported, not crashed", rep2["note"] == "file not found")
+
+
 def main() -> int:
     print("DLSS5Kit offline tests")
     test_ini()
@@ -1001,6 +1085,8 @@ def main() -> int:
     test_api_from_log_wins()
     test_uppercase_module_names_and_ngx_evidence()
     test_renderer_in_a_neighbour_dll()
+    test_presets_module()
+    test_runtime_report()
     test_bridge_private_device_does_not_flip_the_verdict()
     test_generations_and_ptx()
     test_native_dlss_veto()

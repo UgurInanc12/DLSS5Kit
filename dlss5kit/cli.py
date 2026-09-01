@@ -14,7 +14,8 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, config, diagnose, gpu, installer, peinfo, routes
+from . import (__version__, config, diagnose, gpu, installer, pairshot,
+               peinfo, presets, routes)
 
 
 def _resolve_card(choice: str | None) -> gpu.Card:
@@ -190,6 +191,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--diagnose", action="store_true",
                    help="read the logs back and report")
     p.add_argument("--remove", action="store_true", help="uninstall")
+    p.add_argument("--nr-report", action="store_true",
+                   help="report the installed neural-rendering runtime: "
+                        "native kernels for this card, precision, and what "
+                        "that means for fps")
+    p.add_argument("--compare", action="store_true",
+                   help="compose the newest F5 screenshot pair into one "
+                        "side-by-side PNG (press F5 in game first)")
+    p.add_argument("--sr-preset", choices=list(presets.SR_PRESETS),
+                   help="DLSS Super Resolution render preset override")
+    p.add_argument("--rr-preset", choices=list(presets.RR_PRESETS),
+                   help="Ray Reconstruction render preset override")
+    p.add_argument("--nr-upscaling", choices=["on", "off"],
+                   help="EXPERIMENTAL: ask the NR runtime to run at the "
+                        "game's DLSS input resolution and upscale itself "
+                        "(NREnableUpscaling). Current runtime builds may "
+                        "refuse it and fall back to the native path; the "
+                        "overlay status line says which happened.")
     p.add_argument("--generation", "--gen", dest="generation", default="auto",
                    help="RTX generation: auto (default), 20, 30, 40 or 50")
     p.add_argument("--route", choices=[routes.NATIVE, routes.BRIDGE, routes.FEEDER],
@@ -254,6 +272,75 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(diagnose.format_text(d))
         return 4 if d.verdict == diagnose.BAD else 0
+
+    if a.nr_report:
+        card = _resolve_card(a.generation)
+        rep = gpu.runtime_report(game_dir / installer.DLSSNR, card.sm)
+        if a.json:
+            print(json.dumps({"schema": 1, "action": "nr-report",
+                              "gpu": card.describe(), **rep}, indent=2))
+        else:
+            print(f"runtime : {rep['file']}")
+            print(f"card    : {card.describe()}")
+            sms = ", ".join(f"sm_{x}" for x in rep["cubin_sms"]) or "-"
+            print(f"kernels : {sms}")
+            print(f"native  : {rep['native_for_card']}")
+            print(f"precision: {rep['precision']}")
+            if rep["note"]:
+                print(f"note    : {rep['note']}")
+        return 0
+
+    if a.compare:
+        try:
+            pre, post, comp = pairshot.compare_latest(game_dir)
+        except pairshot.PairError as e:
+            if a.json:
+                print(json.dumps({"schema": 1, "ok": False, "error": str(e)},
+                                 indent=2))
+            else:
+                print(f"error: {e}", file=sys.stderr)
+            return 1
+        if a.json:
+            print(json.dumps({"schema": 1, "ok": True, "action": "compare",
+                              "pre": str(pre), "post": str(post),
+                              "composed": str(comp)}, indent=2))
+        else:
+            print(f"pair : {pre.name}")
+            print(f"       {post.name}")
+            print(f"out  : {comp}")
+        return 0
+
+    if a.sr_preset or a.rr_preset or a.nr_upscaling:
+        st = installer.status(game_dir)
+        changed: list[Path] = []
+        if a.sr_preset or a.rr_preset:
+            cur = presets.read_current(game_dir)
+            pr = presets.Presets(sr=a.sr_preset or cur.sr,
+                                 rr=a.rr_preset or cur.rr)
+            try:
+                changed += presets.apply(game_dir, st.get("route"), pr)
+            except presets.PresetError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 2
+            print(presets.describe(pr))
+        if a.nr_upscaling:
+            ini = config.Ini.load(game_dir / "ReShade.ini")
+            ini.set("RenoDX.DLSS5", "NREnableUpscaling",
+                    "1" if a.nr_upscaling == "on" else "0")
+            ini.save(game_dir / "ReShade.ini")
+            changed.append(game_dir / "ReShade.ini")
+            if a.nr_upscaling == "on":
+                print("NREnableUpscaling=1 written. The runtime may refuse it "
+                      "and continue on the native path; the add-on overlay's "
+                      "'Upscaling: requested/active' line reports which. Use "
+                      "a DLSS Balanced/Performance mode in game so there is "
+                      "a lower-resolution input to work at.")
+            else:
+                print("NREnableUpscaling=0 written (native path).")
+        for c in dict.fromkeys(changed):
+            print(f"wrote: {c}")
+        print("Restart the game for the change to take effect.")
+        return 0
 
     try:
         bits = peinfo.exe_bitness(exe)

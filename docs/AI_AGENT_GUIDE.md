@@ -271,6 +271,11 @@ game's own DLSS being displaced. Report the frame count, not the error.
 | `--local <folder>` | prefer components already on disk instead of downloading |
 | `--reshade-setup <exe>` | use a `ReShade_Setup_*_Addon.exe` already downloaded |
 | `--provider 3\|4\|0\|1\|2` | feeder motion-vector shader; 3 (LumeniteFX Kernel) is the default and almost always right |
+| `--sr-preset default\|J\|K\|L\|M` | override the game's DLSS Super Resolution network; restart the game after |
+| `--rr-preset default\|D\|E\|F` | override the Ray Reconstruction network; restart the game after |
+| `--compare` | compose the newest F5 screenshot pair (same frame, NR off vs on) into one side-by-side PNG |
+| `--nr-report` | what the installed NR runtime is: native kernels for this card, precision (fp8/fp16 story), and what that means for fps |
+| `--nr-upscaling on\|off` | EXPERIMENTAL: ask NR to run at the DLSS input resolution; current runtimes may refuse and stay on the native path |
 | `--json` | machine-readable output for `--check`, `--diagnose`, `--remove` |
 | `--version` | print the version and exit |
 | `--yes` / `-y` | accepted for scripting symmetry; this CLI never prompts, so it changes nothing |
@@ -334,3 +339,35 @@ instead.
 
 There is no telemetry and no account. Administrator rights are never required
 or requested.
+
+---
+
+## 13. Same-frame NR comparison (`--compare`)
+
+The add-on itself captures the pair: pressing **F5 in game** arms a capture,
+and on the next DLSS evaluation it writes the SAME frame twice - once as it
+arrived from the game's DLSS (`[pre-NR]`) and once after neural rendering
+(`[NR on]`). That is the only place both versions of one frame exist; nothing
+outside the process can reproduce it.
+
+Flow: tell the user to press F5 during play (while DLSS is active - the
+capture disarms after ~10 s without an evaluation), then run
+`--compare`. The tool finds the newest pair (ReShade.log names the exact
+files) and writes a labelled side-by-side `[compare]` PNG next to them.
+
+## 14. Presets and performance facts worth relaying
+
+- SR presets J/K/L/M and RR presets D/E/F select which neural network the
+  game's own DLSS uses. The override is written into the files the installed
+  route already reads (dlss5-bridge.cfg, [RenoDX.DLSS5] in ReShade.ini) as
+  the documented NGX hint parameters, one per quality slot. A restart is
+  required; the runtime logs "Using App hint Preset ..." when it took.
+- The NR runtime is fp8 (E4M3) quantized. RTX 40/50 run it natively; on
+  RTX 20/30 the SF-family community builds re-implement the kernels in fp16,
+  and that is the ONLY way it runs there - there is no official fp16 build
+  and no precision switch. `--nr-report` states which case the installed
+  file is.
+- NR costs are large on Ampere (community numbers: roughly 40-80% frame-rate
+  loss depending on title and resolution). The honest levers: lower output
+  resolution, and `--nr-upscaling on` IF the runtime accepts it (the overlay's
+  "Upscaling: requested/active" line says whether it did).

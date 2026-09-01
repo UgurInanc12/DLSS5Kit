@@ -17,7 +17,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, cli, config, diagnose, gpu, installer, peinfo, routes
+from . import (__version__, cli, config, diagnose, gpu, installer, pairshot,
+               peinfo, presets, routes)
 
 BG = "#1e2124"
 PANEL = "#282b30"
@@ -176,6 +177,30 @@ class App:
         self.route_note = self._label(ctl, "", fg=MUTED, font=FONT_S)
         self.route_note.pack(side="left", padx=(10, 0))
 
+        # --- controls: DLSS render presets (separate from DLSS 5 NR) ---
+        pr = tk.Frame(self.root, bg=BG)
+        pr.pack(fill="x", padx=18, pady=(0, 8))
+        self._label(pr, "DLSS SR preset", fg=MUTED).pack(side="left", padx=(0, 6))
+        self.sr_var = tk.StringVar(value="default")
+        self.sr_box = ttk.Combobox(pr, textvariable=self.sr_var,
+                                   state="disabled", width=9, font=FONT,
+                                   style="Dark.TCombobox",
+                                   values=list(presets.SR_PRESETS))
+        self.sr_box.pack(side="left", padx=(0, 14))
+        self._label(pr, "RR preset", fg=MUTED).pack(side="left", padx=(0, 6))
+        self.rr_var = tk.StringVar(value="default")
+        self.rr_box = ttk.Combobox(pr, textvariable=self.rr_var,
+                                   state="disabled", width=9, font=FONT,
+                                   style="Dark.TCombobox",
+                                   values=list(presets.RR_PRESETS))
+        self.rr_box.pack(side="left", padx=(0, 10))
+        self.b_presets = self._button(pr, "Apply presets", self.do_presets)
+        self.b_presets.pack(side="left", padx=(0, 10))
+        self.b_presets.configure(state="disabled")
+        self._label(pr, "the game's own DLSS networks (J/K/L/M, D/E/F); "
+                        "restart the game after applying", fg=MUTED,
+                    font=FONT_S).pack(side="left")
+
         # --- action row ---
         act = tk.Frame(self.root, bg=BG)
         act.pack(fill="x", padx=18, pady=(0, 10))
@@ -189,8 +214,11 @@ class App:
         self.b_diag.pack(side="left", padx=(0, 8))
         self.b_diag.configure(state="disabled")
         self.b_open = self._button(act, "Open folder", self.open_folder)
-        self.b_open.pack(side="left")
+        self.b_open.pack(side="left", padx=(0, 8))
         self.b_open.configure(state="disabled")
+        self.b_compare = self._button(act, "Compare pair", self.do_compare)
+        self.b_compare.pack(side="left")
+        self.b_compare.configure(state="disabled")
 
         # A determinate progress bar was here and it lied: the steps are not
         # equal in size (a 165 MB download and an ini write are one step
@@ -337,6 +365,13 @@ class App:
         self.b_remove.configure(state="normal" if st["installed"] else "disabled")
         self.b_diag.configure(state="normal")
         self.b_open.configure(state="normal")
+        self.b_compare.configure(state="normal")
+        cur = presets.read_current(self.game_dir)
+        self.sr_var.set(cur.sr)
+        self.rr_var.set(cur.rr)
+        for box in (self.sr_box, self.rr_box):
+            box.configure(state="readonly")
+        self.b_presets.configure(state="normal" if st["installed"] else "disabled")
         self._refresh_route()
 
     def _show_verdict(self) -> None:
@@ -440,6 +475,34 @@ class App:
             if f.evidence:
                 self.say(f"      {f.evidence}", "muted")
         self.say(f"  => {d.summary}", "bad" if d.verdict == "bad" else "ok")
+
+    def do_presets(self) -> None:
+        if not self.game_dir:
+            return
+        st = installer.status(self.game_dir)
+        pr = presets.Presets(sr=self.sr_var.get(), rr=self.rr_var.get())
+        try:
+            written = presets.apply(self.game_dir, st.get("route"), pr)
+        except presets.PresetError as e:
+            messagebox.showerror("DLSS5Kit", str(e))
+            return
+        self.say(f"presets: {presets.describe(pr)}", "ok")
+        for w in written:
+            self.say(f"  wrote {w.name}", "muted")
+        self.say("Restart the game for the presets to take effect.", "warn")
+
+    def do_compare(self) -> None:
+        if not self.game_dir:
+            return
+        try:
+            pre, post, comp = pairshot.compare_latest(self.game_dir)
+        except pairshot.PairError as e:
+            self.say(str(e), "warn")
+            return
+        self.say(f"compare: {comp.name}", "ok")
+        self.say(f"  from {pre.name} + {post.name}", "muted")
+        import subprocess
+        subprocess.Popen(["explorer", "/select,", str(comp)])
 
     def _run(self, fn) -> None:
         self.busy = True
