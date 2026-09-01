@@ -1075,6 +1075,29 @@ def test_runtime_report():
     check("missing file reported, not crashed", rep2["note"] == "file not found")
 
 
+def test_kit_addon_step():
+    """The control panel add-on: bundled -> installed + tracked in the
+    manifest (so Remove deletes it); not bundled -> honest skip note."""
+    print("\n[dlss5kit control panel add-on]")
+    from dlss5kit import installer as inst
+
+    # The step is in every route's plan, after the DLSS 5 add-on.
+    for route in (inst.NATIVE, inst.BRIDGE, inst.FEEDER):
+        steps = inst.plan_steps(route, provider=1)
+        check(f"{route}: step planned", "DLSS5Kit control panel" in steps)
+        check(f"{route}: ordered after the add-on",
+              steps.index("DLSS5Kit control panel")
+              == steps.index("DLSS 5 add-on") + 1)
+
+    # bundled_kit_addon: from source it points at addon/dlss5kit.addon64
+    # when built; the answer must be a real file or None, never a bogus path.
+    found = inst.bundled_kit_addon()
+    check("bundled_kit_addon returns a file or None",
+          found is None or found.is_file(), str(found))
+    if found is not None:
+        check("it is the addon64", found.name == inst.KIT_ADDON)
+
+
 def main() -> int:
     print("DLSS5Kit offline tests")
     test_ini()
@@ -1087,6 +1110,7 @@ def main() -> int:
     test_renderer_in_a_neighbour_dll()
     test_presets_module()
     test_runtime_report()
+    test_kit_addon_step()
     test_bridge_private_device_does_not_flip_the_verdict()
     test_generations_and_ptx()
     test_native_dlss_veto()

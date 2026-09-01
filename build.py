@@ -8,6 +8,7 @@ a console when one is attached, and opens the window when given no arguments.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -44,8 +45,19 @@ def main() -> int:
         "--distpath", str(HERE / "dist"),
         "--workpath", str(HERE / "build"),
         "--specpath", str(HERE / "build"),
-        str(HERE / "dlss5kit.py"),
     ]
+    # Bundle the in-game control panel add-on when it has been built
+    # (addon/build_addon.bat, needs MSVC). The installer looks for it in
+    # sys._MEIPASS and quietly skips the step when it is absent, so a build
+    # without MSVC still produces a fully working exe.
+    addon = HERE / "addon" / "dlss5kit.addon64"
+    if addon.is_file():
+        cmd += ["--add-data", f"{addon}{os.pathsep}."]
+        print(f"bundling {addon.name} ({addon.stat().st_size // 1024} KB)")
+    else:
+        print("addon/dlss5kit.addon64 not built - exe will not bundle the "
+              "in-game control panel")
+    cmd.append(str(HERE / "dlss5kit.py"))
     print(" ".join(cmd))
     rc = subprocess.call(cmd)
     if rc != 0:

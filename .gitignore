@@ -23,3 +23,10 @@ graphify-out/
 .idea/
 Thumbs.db
 desktop.ini
+
+# addon build artifacts (the .addon64 itself is built in CI, never committed)
+addon/*.addon64
+addon/*.obj
+addon/*.lib
+addon/*.exp
+addon/build.log

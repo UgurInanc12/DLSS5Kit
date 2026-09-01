@@ -56,6 +56,26 @@ DLSS = "nvngx_dlss.dll"
 BRIDGE_ADDON = "dlss5-bridge.addon64"
 FEEDER_ADDON = "dlss5-feed.addon64"
 FEEDER_FX = "DLSS5_Feed.fx"
+KIT_ADDON = "dlss5kit.addon64"
+
+
+def bundled_kit_addon() -> Path | None:
+    """The control-panel add-on shipped with the tool, if present.
+
+    Frozen EXE: PyInstaller unpacks data files under sys._MEIPASS.
+    From source: the addon/ folder next to the package (built by
+    addon/build_addon.bat; absent until someone builds it).
+    """
+    import sys
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(getattr(sys, "_MEIPASS", "")) / KIT_ADDON)
+    here = Path(__file__).resolve().parent.parent
+    candidates.append(here / "addon" / KIT_ADDON)
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
 
 SHADERS = Path("reshade-shaders") / "Shaders"
 INCLUDE = SHADERS / "include"
@@ -395,8 +415,8 @@ def plan_steps(route: str, provider: int) -> list[str]:
             steps.append("LumeniteFX (motion vectors)")
     elif route == BRIDGE:
         steps.append("dlss5-bridge")
-    steps += ["DLSS 5 add-on", "nvngx_dlssnr.dll", "nvngx_dlss.dll",
-              "ReShade configuration"]
+    steps += ["DLSS 5 add-on", "DLSS5Kit control panel", "nvngx_dlssnr.dll",
+              "nvngx_dlss.dll", "ReShade configuration"]
     if route == FEEDER:
         steps.append("dlss5-feed.cfg")
     elif route == BRIDGE:
@@ -574,6 +594,18 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
             _place(extract_member(f, ".addon64"), root / RENODX, rep, root)
             log(f"      renodx-dlss5 {e['label']}")
             rep.components["renodx"] = e["label"]
+
+        begin("DLSS5Kit control panel")
+        kit = bundled_kit_addon()
+        if kit is not None:
+            _copy(kit, root / KIT_ADDON, rep, root)
+            log(f"      {KIT_ADDON} (in-game SR/RR preset + NR resolution tab)")
+            rep.components["kit_addon"] = "bundled"
+        else:
+            log("      skipped: dlss5kit.addon64 not bundled with this build")
+            rep.warnings.append(
+                "the in-game control panel add-on was not bundled; presets "
+                "can still be set from the CLI or GUI")
 
         begin("nvngx_dlssnr.dll")
         card = opt.card or gpu.detect_card()

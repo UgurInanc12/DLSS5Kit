@@ -32,6 +32,28 @@ jobs:
       - name: Check AGENTS.md against the real CLI
         run: python tests/test_agents_doc.py
 
+      # The in-game control panel is a real ReShade add-on (C++). MSVC is
+      # preinstalled on windows-latest; this compiles addon/dlss5kit.addon64
+      # so build.py bundles it into the exe.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build the in-game control panel add-on
+        shell: cmd
+        working-directory: addon
+        run: |
+          cl /nologo /std:c++17 /O2 /W4 /EHsc /LD /DNDEBUG dlss5kit_addon.cpp /link /OUT:dlss5kit.addon64 user32.lib
+
+      - name: Verify the add-on
+        shell: pwsh
+        working-directory: addon
+        run: |
+          if (-not (Test-Path "dlss5kit.addon64")) { throw "dlss5kit.addon64 was not produced" }
+          $kb = (Get-Item "dlss5kit.addon64").Length / 1KB
+          if ($kb -lt 50) { throw "dlss5kit.addon64 is only $kb KB - the build is incomplete" }
+          Write-Host ("addon built {0:N0} KB" -f $kb)
+
       - name: Build the executable
         run: |
           python -m pip install --upgrade pip
