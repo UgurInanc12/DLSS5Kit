@@ -61,27 +61,39 @@ jobs:
           python build.py
 
       # A PyInstaller run can "succeed" and still produce nothing useful, so
-      # the artifact is checked before it is published.
-      - name: Verify the executable
+      # the artifact is checked before it is published. The shipped artifact
+      # is the ZIPPED FOLDER, not a one-file exe: measured on VirusTotal,
+      # onefile scored 6/70 (Trojan:Win32/Wacatac.B!ml) while the zipped
+      # onedir build scores 1/70 with Microsoft clean. Same code either way.
+      - name: Verify the build
         shell: pwsh
         run: |
-          $exe = "dist/DLSS5Kit.exe"
-          if (-not (Test-Path $exe)) { throw "dist/DLSS5Kit.exe was not produced" }
+          $exe = "dist/DLSS5Kit/DLSS5Kit.exe"
+          if (-not (Test-Path $exe)) { throw "$exe was not produced" }
           $mb = (Get-Item $exe).Length / 1MB
-          if ($mb -lt 5) { throw "DLSS5Kit.exe is only $mb MB - the build is incomplete" }
-          Write-Host ("built {0:N1} MB" -f $mb)
-          # --gpu needs no game folder and exercises detection plus the CLI.
+          if ($mb -lt 1) { throw "the launcher is only $mb MB - build incomplete" }
+          $zip = Get-ChildItem "dist/DLSS5Kit-*-win64.zip" -ErrorAction SilentlyContinue
+          if (-not $zip) { throw "the release zip was not produced" }
+          $zmb = $zip.Length / 1MB
+          if ($zmb -lt 5) { throw "the zip is only $zmb MB - build incomplete" }
+          Write-Host ("launcher {0:N1} MB, zip {1:N1} MB" -f $mb, $zmb)
+          # The version resource is the thing that halved AV detections;
+          # a build that silently loses it must not ship.
+          $vi = (Get-Item $exe).VersionInfo
+          if (-not $vi.CompanyName) { throw "version resource missing: CompanyName empty" }
+          if (-not $vi.FileVersion) { throw "version resource missing: FileVersion empty" }
+          Write-Host ("metadata: {0} / {1}" -f $vi.CompanyName, $vi.FileVersion)
           & $exe --version
           if ($LASTEXITCODE -ne 0) { throw "--version failed" }
 
       - uses: actions/upload-artifact@v4
         with:
           name: DLSS5Kit
-          path: dist/DLSS5Kit.exe
+          path: dist/DLSS5Kit-*-win64.zip
 
-      - name: Attach the executable to the release
+      - name: Attach the build to the release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/DLSS5Kit.exe
+          files: dist/DLSS5Kit-*-win64.zip
           generate_release_notes: true

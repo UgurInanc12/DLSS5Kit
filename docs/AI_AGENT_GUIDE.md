@@ -29,7 +29,9 @@ evidence-driven.
 Single file, no installation, no Python:
 
 ```
-https://github.com/UgurInanc12/DLSS5Kit/releases/latest  ->  DLSS5Kit.exe
+https://github.com/UgurInanc12/DLSS5Kit/releases/latest  ->  DLSS5Kit-<ver>-win64.zip
+(extract it; DLSS5Kit.exe lives in the DLSS5Kit/ folder and needs the
+files beside it, so do not move the exe out on its own)
 ```
 
 From source instead (a checkout of this repo, Python 3.10+):

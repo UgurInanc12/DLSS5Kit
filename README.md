@@ -7,8 +7,9 @@ It looks at the game, decides how DLSS 5 can actually reach it, writes the
 files and the configuration, and records everything it wrote so Remove puts
 the folder back exactly as it was.
 
-**[Download DLSS5Kit.exe](../../releases/latest)** - single file, no
-installation, no Python needed.
+**[Download the latest release](../../releases/latest)** - a zip, no
+installation and no Python needed. Extract it anywhere and run `DLSS5Kit.exe`
+from inside the folder, keeping the folder together.
 
 ```
 DLSS5Kit.exe                                 open the window
@@ -201,25 +202,40 @@ Not affiliated with NVIDIA, ReShade or RenoDX. Use at your own risk.
 
 ## Antivirus false positives
 
-A few engines on VirusTotal flag the released `DLSS5Kit.exe`. Measured on
-VirusTotal, same source, only the build metadata changed:
+This was a real problem and it is now fixed. Earlier releases shipped a
+single self-extracting `DLSS5Kit.exe`, which several engines flagged. The
+release is now a **zip containing a normal program folder**, which scanners
+are happy with. Every measurement below is from VirusTotal, same source code,
+only the packaging changed:
 
-| Build | Detections | Microsoft |
+| Packaging | Detections | Microsoft |
 |---|---|---|
-| v1.6.0, no version resource | **6/70** | `Trojan:Win32/Wacatac.B!ml` |
-| v1.6.1, version resource added | **3-4/70** | varies between runs |
+| one-file exe, no version resource (v1.6.0) | 6/70 | `Trojan:Win32/Wacatac.B!ml` |
+| one-file exe, version resource added | 3-4/70 | unstable between builds |
+| folder build, launcher exe alone | 2/70 | `Wacatac.C!ml` |
+| **folder build, zipped (what you download now)** | **1/70** | **clean** |
+| Nuitka standalone exe (tried, rejected) | 2/70 | ESET + Microsoft |
 
-Adding proper file metadata removed Skyhigh's `BehavesLike.Win64.Injector`,
-Elastic and SecureAge outright. What remains is Bkav, Zillya and APEX, which
-bucket PyInstaller output generically, plus Microsoft's `Wacatac.B!ml`, which
-is unstable: two v1.6.1 binaries built from the same commit scored 3/70 with
-Microsoft clean and 4/70 with Microsoft flagging. The `!ml` suffix is
-Microsoft's own marker for "machine-learning guess", and it behaves like one.
-A locally installed, fully updated Defender reports **no threats** on the same
-files (`MpCmdRun.exe -Scan -ScanType 3 -File DLSS5Kit.exe`).
+**Why the one-file build looked suspicious.** A PyInstaller one-file exe is a
+self-extracting archive: it unpacks an entire Python runtime into a temp
+folder at launch and runs it from there. That is structurally what a dropper
+does, so machine-learning classifiers score it. Nothing in this project's code
+caused it - the wrapper did.
 
-Here is what causes the detections, and how to check the claim yourself
-rather than taking anyone's word for it.
+**What changed.** The release is a folder: a 2 MB launcher next to the DLLs it
+loads, exactly like any other Windows program, plus a proper version resource
+naming the publisher, version and licence. Nothing is unpacked at runtime and
+nothing is anonymous. Nuitka (compiling to real C) was also tried and measured
+worse, because ESET then flags its packer signature.
+
+**How to use it:** download the zip, extract the folder anywhere, run
+`DLSS5Kit.exe` from inside it. Keep the folder together - the exe needs the
+files next to it.
+
+The one remaining engine (MaxSecure, `susgen` = generic suspicion) and the
+occasional heuristic hit are unavoidable without a code-signing certificate,
+which costs money and changes no behaviour. Here is what causes them, and how
+to verify the tool yourself rather than taking anyone's word for it.
 
 **Why it happens**
 
@@ -269,8 +285,8 @@ components listed in Credits.
   "found no threats", while VirusTotal's Microsoft engine reports the `!ml`
   (machine-learning guess) verdict. A `!ml` suffix means exactly that: a
   prediction, not a signature match.
-- Check the file's properties (right-click, Details): from v1.6.1 the exe
-  names its publisher, description, version and licence. Compare hashes with
+- Check the launcher's properties (right-click, Details): it names its
+  publisher, description, version and licence. Compare the zip's hash with
   the releases page; if a file claiming to be DLSS5Kit does not match one,
   it did not come from here.
 

@@ -30,3 +30,6 @@ addon/*.obj
 addon/*.lib
 addon/*.exp
 addon/build.log
+dist_onedir/
+dist_nuitka/
+build_onedir/

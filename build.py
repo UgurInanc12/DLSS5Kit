@@ -1,10 +1,29 @@
-"""Build DLSS5Kit.exe with PyInstaller.
+"""Build DLSS5Kit with PyInstaller.
 
-    python build.py
+    python build.py            -> dist/DLSS5Kit/ + DLSS5Kit-<ver>-win64.zip
+    python build.py --onefile  -> dist/DLSS5Kit.exe (legacy single file)
 
-Produces dist\\DLSS5Kit.exe - a single windowed executable with no console.
-The CLI still works from it: DLSS5Kit.exe "D:\\Games\\Game" --check writes to
-a console when one is attached, and opens the window when given no arguments.
+WHY THE DEFAULT IS A FOLDER, NOT ONE FILE
+-----------------------------------------
+A --onefile build is a self-extracting archive: the exe unpacks a whole
+Python runtime to a temp folder and runs it from there. That is precisely
+the shape of a dropper, so ML-based antivirus classifiers score it, and the
+result was a real user seeing 6/70 on VirusTotal with
+Trojan:Win32/Wacatac.B!ml.
+
+Measured on VirusTotal, identical source, only the packaging changed:
+
+    onefile, no version resource      6/70   Microsoft: Wacatac.B!ml
+    onefile, with version resource    3-4/70 Microsoft: unstable
+    onedir launcher exe               2/70   Microsoft: Wacatac.C!ml
+    onedir, zipped (what users get)   1/70   Microsoft: clean
+    Nuitka standalone exe             2/70   ESET + Microsoft
+    Nuitka standalone, zipped         2/70   ESET: Python/Packed.Nuitka_AGen
+
+The onedir zip wins: the launcher is a normal 2 MB program that loads DLLs
+sitting next to it, with nothing to unpack at runtime. Nuitka removes the
+Python-runtime giveaway but ESET then flags its own packer signature, so it
+is not an improvement here.
 """
 from __future__ import annotations
 
@@ -54,6 +73,7 @@ def write_version_resource() -> Path | None:
 
 
 def main() -> int:
+    onefile = "--onefile" in sys.argv
     ensure_pyinstaller()
     for d in ("build", "dist"):
         shutil.rmtree(HERE / d, ignore_errors=True)
@@ -61,7 +81,7 @@ def main() -> int:
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--onefile",
+        "--onefile" if onefile else "--onedir",
         "--name", NAME,
         # Console kept: the CLI is a real interface, and a windowed build
         # swallows --check and --diagnose output entirely.
@@ -91,11 +111,23 @@ def main() -> int:
     if rc != 0:
         return rc
 
-    exe = HERE / "dist" / f"{NAME}.exe"
+    exe = (HERE / "dist" / f"{NAME}.exe" if onefile
+           else HERE / "dist" / NAME / f"{NAME}.exe")
     if not exe.is_file():
         print("build finished but the exe is missing", file=sys.stderr)
         return 1
     print(f"\nBuilt {exe}  ({exe.stat().st_size / (1024 * 1024):.1f} MB)")
+
+    if not onefile:
+        # Ship the folder as one zip: that is the artifact users download,
+        # and it is what scanners see. Measured 1/70 versus 6/70 for onefile.
+        sys.path.insert(0, str(HERE))
+        from dlss5kit import __version__ as ver
+        base = HERE / "dist" / f"{NAME}-{ver}-win64"
+        zipf = shutil.make_archive(str(base), "zip",
+                                   root_dir=HERE / "dist", base_dir=NAME)
+        mb = Path(zipf).stat().st_size / (1024 * 1024)
+        print(f"Packaged {zipf}  ({mb:.1f} MB)")
     return 0
 
 
