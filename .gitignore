@@ -15,6 +15,9 @@ dlssnr_matrix.json
 t.txt
 test_out.txt
 
+# Local knowledge graph (graphify + GraphPulse), rebuilt on demand
+graphify-out/
+
 # Editors / OS
 .vscode/
 .idea/
