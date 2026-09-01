@@ -199,6 +199,59 @@ own copies, or do not use this tool.
 
 Not affiliated with NVIDIA, ReShade or RenoDX. Use at your own risk.
 
+## Antivirus false positives
+
+A few engines on VirusTotal flag the released `DLSS5Kit.exe` (6/70 on
+v1.6.0, labels like `Trojan:Win32/Wacatac.B!ml`, `BehavesLike.Win64.Injector`,
+`trojan.convagent`). Here is exactly what causes that, and how to check the
+claim yourself rather than taking anyone's word for it.
+
+**Why it happens**
+
+1. **PyInstaller.** The exe is a Python interpreter plus a compressed archive
+   that unpacks itself to a temp folder at startup. Self-extracting behaviour
+   is what packers do, so heuristic and ML engines score it. This is a
+   long-standing, well-documented PyInstaller problem, not something specific
+   to this tool.
+2. **It is an injector, and says so.** The tool's entire job is to place a
+   proxy DLL (`dxgi.dll`) and ReShade add-ons next to a game executable so the
+   game loads them. `BehavesLike.Win64.Injector` is a fair description of the
+   advertised purpose. The difference from malware is that it is the whole
+   point of the program, it happens only in a folder you choose, and every
+   file written is listed in `dlss5kit-manifest.json` and removed by `Remove`.
+3. **No code-signing certificate.** Unsigned executables start from a worse
+   reputation score. A certificate costs money and would not change a single
+   line of behaviour.
+
+**What it is not:** there is no process injection into running programs, no
+persistence, no obfuscated payload and no telemetry. Grepping the source for
+`CreateRemoteThread`, `WriteProcessMemory`, `VirtualAllocEx`, `OpenProcess`,
+`SetWindowsHookEx`, run-key/scheduled-task persistence, and `exec`/`eval`
+returns zero hits. `subprocess` is used only to open Explorer. The only hosts
+contacted are `api.github.com`, `codeload.github.com`,
+`raw.githubusercontent.com` and `reshade.me`, all for downloading the
+components listed in Credits.
+
+**Check it yourself**
+
+- Every release binary is built by GitHub Actions from this repository, in
+  public: the workflow run that produced it is linked on the release, and the
+  artifact is uploaded by CI, not from anyone's machine.
+- Run the tool from source instead of the exe (`python dlss5kit.py`) - same
+  program, no PyInstaller wrapper, no detections.
+- Scan the exe with an up-to-date local Defender: measured on v1.6.0,
+  `MpCmdRun.exe -Scan -ScanType 3 -File DLSS5Kit.exe` returns
+  "found no threats", while VirusTotal's Microsoft engine reports the `!ml`
+  (machine-learning guess) verdict. A `!ml` suffix means exactly that: a
+  prediction, not a signature match.
+- Compare hashes. v1.6.0 is
+  `20d660efd2059f5138b7c7777046d7ecfa33f974f415da5d80b684d17123142a`
+  (11,798,468 bytes). If a file claiming to be DLSS5Kit does not match a hash
+  from the releases page, it did not come from here.
+
+If you are not comfortable with any of this, use the source checkout. That is
+a reasonable choice and the tool works identically.
+
 ## Warnings
 
 - **Do not use this in online games.** ReShade with add-ons is detected by
