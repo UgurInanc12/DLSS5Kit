@@ -1,0 +1,53 @@
+"""Windows version-resource for the built executable.
+
+WHY THIS FILE EXISTS
+--------------------
+The v1.6.0 release exe carried NO version resource at all: CompanyName,
+FileDescription, FileVersion, ProductName and LegalCopyright were empty
+strings. Measured 2026-09-01 on the published binary.
+
+That matters for antivirus reputation. An unsigned, self-extracting PE with
+no author, no product name and no version is indistinguishable from the
+thousands of anonymous packed binaries the ML classifiers are trained on -
+which is how a Python GUI tool ends up labelled Trojan:Win32/Wacatac.B!ml.
+Metadata is not a magic fix and it is not a substitute for code signing, but
+it is the one lever available for free, and it makes the file honest about
+what it is and who publishes it.
+
+The version numbers are filled in by build.py from dlss5kit.__version__ so
+this never drifts from the package.
+"""
+VSVersionInfo(
+    ffi=FixedFileInfo(
+        filevers=(%(v1)d, %(v2)d, %(v3)d, 0),
+        prodvers=(%(v1)d, %(v2)d, %(v3)d, 0),
+        mask=0x3F,
+        flags=0x0,
+        OS=0x40004,
+        fileType=0x1,
+        subtype=0x0,
+        date=(0, 0),
+    ),
+    kids=[
+        StringFileInfo([
+            StringTable(
+                "040904B0",
+                [
+                    StringStruct("CompanyName", "Ugur Inanc"),
+                    StringStruct("FileDescription",
+                                 "DLSS5Kit - DLSS 5 neural rendering installer for PC games"),
+                    StringStruct("FileVersion", "%(ver)s.0"),
+                    StringStruct("InternalName", "DLSS5Kit"),
+                    StringStruct("LegalCopyright",
+                                 "Copyright (c) 2026 Ugur Inanc. MIT licence."),
+                    StringStruct("OriginalFilename", "DLSS5Kit.exe"),
+                    StringStruct("ProductName", "DLSS5Kit"),
+                    StringStruct("ProductVersion", "%(ver)s.0"),
+                    StringStruct("Comments",
+                                 "Open source: https://github.com/UgurInanc12/DLSS5Kit"),
+                ],
+            )
+        ]),
+        VarFileInfo([VarStruct("Translation", [0x0409, 0x04B0])]),
+    ],
+)

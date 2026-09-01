@@ -201,9 +201,16 @@ Not affiliated with NVIDIA, ReShade or RenoDX. Use at your own risk.
 
 ## Antivirus false positives
 
-A few engines on VirusTotal flag the released `DLSS5Kit.exe` (6/70 on
-v1.6.0, labels like `Trojan:Win32/Wacatac.B!ml`, `BehavesLike.Win64.Injector`,
-`trojan.convagent`). Here is exactly what causes that, and how to check the
+A few engines on VirusTotal flag the released `DLSS5Kit.exe`. Measured, with
+the fix applied:
+
+| Build | Detections | Microsoft Defender |
+|---|---|---|
+| v1.6.0 (no version resource) | **6/70** | `Trojan:Win32/Wacatac.B!ml` |
+| v1.6.1 (version resource added) | **3/70** | clean |
+
+The remaining three (Bkav, Zillya, APEX) are generic heuristic buckets that
+flag PyInstaller output broadly. Here is what causes it, and how to check the
 claim yourself rather than taking anyone's word for it.
 
 **Why it happens**
@@ -222,6 +229,15 @@ claim yourself rather than taking anyone's word for it.
 3. **No code-signing certificate.** Unsigned executables start from a worse
    reputation score. A certificate costs money and would not change a single
    line of behaviour.
+
+**What was fixed.** v1.6.0 shipped with an entirely empty version resource:
+no CompanyName, no FileDescription, no FileVersion. To an ML classifier that
+is an anonymous packed binary, which is most of what it was trained to catch.
+v1.6.1 embeds proper metadata (publisher, description, version, licence, the
+repository URL), generated from the package version at build time. That alone
+halved the detections and cleared Microsoft. It is not a trick to evade
+scanners: it is the file telling the truth about itself, which it previously
+did not.
 
 **What it is not:** there is no process injection into running programs, no
 persistence, no obfuscated payload and no telemetry. Grepping the source for
@@ -244,10 +260,10 @@ components listed in Credits.
   "found no threats", while VirusTotal's Microsoft engine reports the `!ml`
   (machine-learning guess) verdict. A `!ml` suffix means exactly that: a
   prediction, not a signature match.
-- Compare hashes. v1.6.0 is
-  `20d660efd2059f5138b7c7777046d7ecfa33f974f415da5d80b684d17123142a`
-  (11,798,468 bytes). If a file claiming to be DLSS5Kit does not match a hash
-  from the releases page, it did not come from here.
+- Check the file's properties (right-click, Details): from v1.6.1 the exe
+  names its publisher, description, version and licence. Compare hashes with
+  the releases page; if a file claiming to be DLSS5Kit does not match one,
+  it did not come from here.
 
 If you are not comfortable with any of this, use the source checkout. That is
 a reasonable choice and the tool works identically.
