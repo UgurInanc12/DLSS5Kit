@@ -245,10 +245,26 @@ def test_routing():
         p3 = routes.choose(d2, apip, 64)
         check("D3D12 without DLSS -> feeder", p3.route == routes.FEEDER, p3.route)
 
-        # 32-bit is refused with a reason
+        # 32-bit D3D11/D3D12 is supported through the feeder's out-of-process
+        # 64-bit helper (DLSS5-Feeder's addon32 + host64\). NGX is x64-only
+        # and 32-bit ReShade loads .addon32 only, so this is the ONLY route
+        # available there - and only on D3D11/D3D12.
         p4 = routes.choose(d2, apip, 32)
-        check("32-bit refused", p4.supported is False)
-        check("refusal explains why", "32-bit" in p4.blocker)
+        check("32-bit D3D12 -> feeder", p4.supported and p4.route == routes.FEEDER,
+              f"{p4.supported}/{p4.route}")
+        check("and it explains the helper process",
+              "64-bit helper" in p4.reason or "host64" in p4.reason,
+              p4.reason[:70])
+        check("no alternative routes offered on 32-bit", p4.options == [],
+              str(p4.options))
+        check("the beta status is stated",
+              any("beta" in w for w in p4.warnings), str(p4.warnings)[:70])
+
+        # 32-bit on an API with no path is still refused, and says which.
+        p5 = routes.choose(d2, peinfo.ApiInfo(api=peinfo.OPENGL,
+                                              confidence="high"), 32)
+        check("32-bit OpenGL refused", p5.supported is False)
+        check("and names the API", peinfo.OPENGL in p5.blocker, p5.blocker[:70])
 
         # Vulkan warns about the global layer
         pv = routes.choose(d2, peinfo.ApiInfo(api=peinfo.VULKAN), 64)
@@ -1134,6 +1150,19 @@ def test_engine_tools_and_rtx_remix():
           not any(p.stem.lower() in tools for p in exes),
           str([p.name for p in exes if p.stem.lower() in tools][:3]))
 
+    # Crysis (2007): Bin64\ holds BOTH a 32-bit Crysis.exe (9.4 MB) and the
+    # real 64-bit Crysis64.exe (53 KB). Path and size both point the wrong
+    # way; only the PE header settles it, so bitness has to score.
+    crysis = Path(r"D:\Games\Steam\steamapps\common\Crysis")
+    if crysis.is_dir():
+        pick, _ = peinfo.resolve_target(crysis)
+        check("Crysis picks the 64-bit exe over the bigger 32-bit one",
+              peinfo.exe_bitness(pick) == 64, f"{pick.name} is 32-bit")
+        check("and it is Crysis64.exe", pick.name.lower() == "crysis64.exe",
+              pick.name)
+    else:
+        print("  (Crysis not installed: bitness-preference case skipped)")
+
     bridge = peinfo.remix_bridge(game)
     check("the Remix bridge is found", bridge is not None and bridge.is_file())
     if bridge:
@@ -1155,6 +1184,57 @@ def test_engine_tools_and_rtx_remix():
               peinfo.remix_bridge(d) is None)
 
 
+def test_32bit_install_layout():
+    """A 32-bit game gets the split install: game half + host64\\ half.
+
+    DLSS5-Feeder solves 32-bit by splitting at the shared-NT-handle seam:
+    dlss5-feed.addon32 runs inside the 32-bit game and copies frames into
+    shared GPU textures; host64\\dlss5-feed-host64.exe is a separate 64-bit
+    process with its OWN ReShade, renodx add-on and NGX runtimes, and does
+    the DLSS work. Getting the split wrong is silent: 32-bit ReShade simply
+    never loads a .addon64, and the helper never finds its runtimes.
+    """
+    print("\n[32-bit split install layout]")
+    from dlss5kit import installer as inst
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # A stand-in for the ReShade setup: a zip with both DLLs, which is
+        # exactly what the real installer is (PE + appended zip).
+        setup = root / "ReShade_Setup_6.8.0_Addon.exe"
+        import zipfile
+        with zipfile.ZipFile(setup, "w") as z:
+            z.writestr("ReShade32.dll", b"MZ" + b"\x00" * 600)   # x86 marker
+            z.writestr("ReShade64.dll", b"MZ" + b"\x00" * 900)   # x64 marker
+        got32 = inst.extract_member(setup, "ReShade32.dll")
+        got64 = inst.extract_member(setup, "ReShade64.dll")
+        check("the setup carries both bitnesses",
+              len(got32) == 602 and len(got64) == 902,
+              f"{len(got32)}/{len(got64)}")
+
+        # The layout contract, asserted as data rather than by running a
+        # network install: what goes beside the game, what goes in host64\.
+        game_side = {inst.FEEDER_ADDON32, inst.PROXY_DLL, "ReShade.ini"}
+        host_side = {inst.FEEDER_HOST64, inst.PROXY_DLL, inst.RENODX,
+                     inst.DLSSNR, inst.DLSS, "ReShade.ini"}
+        check("the game half loads a 32-bit add-on",
+              inst.FEEDER_ADDON32.endswith(".addon32"))
+        check("the 64-bit add-on is NOT in the game half",
+              inst.FEEDER_ADDON not in game_side)
+        check("the helper gets its own proxy DLL", inst.PROXY_DLL in host_side)
+        check("and the NGX runtimes", {inst.DLSSNR, inst.DLSS} <= host_side)
+        check("host64 dir name matches upstream", inst.HOST64_DIR == "host64")
+
+        # status() must see an install whose 64-bit parts are in host64\.
+        (root / inst.HOST64_DIR).mkdir()
+        for name in (inst.RENODX, inst.DLSSNR, inst.DLSS):
+            (root / inst.HOST64_DIR / name).write_bytes(b"x")
+        st = inst.status(root)
+        check("status finds the add-on in host64", st["present"]["DLSS 5 add-on"])
+        check("status finds dlssnr in host64", st["present"]["nvngx_dlssnr"])
+        check("status finds dlss in host64", st["present"]["nvngx_dlss"])
+
+
 def main() -> int:
     print("DLSS5Kit offline tests")
     test_ini()
@@ -1169,6 +1249,7 @@ def main() -> int:
     test_runtime_report()
     test_kit_addon_step()
     test_engine_tools_and_rtx_remix()
+    test_32bit_install_layout()
     test_bridge_private_device_does_not_flip_the_verdict()
     test_generations_and_ptx()
     test_native_dlss_veto()

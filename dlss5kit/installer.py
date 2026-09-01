@@ -55,6 +55,9 @@ DLSSNR = "nvngx_dlssnr.dll"
 DLSS = "nvngx_dlss.dll"
 BRIDGE_ADDON = "dlss5-bridge.addon64"
 FEEDER_ADDON = "dlss5-feed.addon64"
+FEEDER_ADDON32 = "dlss5-feed.addon32"
+FEEDER_HOST64 = "dlss5-feed-host64.exe"
+HOST64_DIR = "host64"
 FEEDER_FX = "DLSS5_Feed.fx"
 KIT_ADDON = "dlss5kit.addon64"
 
@@ -518,7 +521,9 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
             ver, url = sources.resolve_reshade()
             setup = dl(url, f"ReShade_Setup_{ver}_Addon.exe")
         rep.components["reshade"] = ver
-        _place(extract_member(setup, "ReShade64.dll"), root / proxy, rep, root)
+        _place(extract_member(setup, "ReShade32.dll" if bitness != 64
+                              else "ReShade64.dll"),
+               root / proxy, rep, root)
         log(f"      ReShade {ver} -> {proxy}")
 
         # --- 2) the route-specific middle ---------------------------------
@@ -543,20 +548,22 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
             log(f"      {', '.join(sources.RESHADE_HEADERS)}")
 
             begin("DLSS5-Feeder")
-            if FEEDER_ADDON in local and FEEDER_FX in local:
-                _copy(local[FEEDER_ADDON], root / FEEDER_ADDON, rep, root)
+            # A 32-bit game runs 32-bit ReShade, which loads .addon32 only.
+            game_addon = FEEDER_ADDON if bitness == 64 else FEEDER_ADDON32
+            if game_addon in local and FEEDER_FX in local:
+                _copy(local[game_addon], root / game_addon, rep, root)
                 _copy(local[FEEDER_FX], root / SHADERS / FEEDER_FX, rep, root)
-                log("      DLSS5-Feeder (local files)")
+                log(f"      DLSS5-Feeder (local files, {game_addon})")
                 rep.components["feeder"] = "local"
             else:
                 tag, assets = sources.resolve_feeder()
-                for name, dest in ((FEEDER_ADDON, root / FEEDER_ADDON),
+                for name, dest in ((game_addon, root / game_addon),
                                    (FEEDER_FX, root / SHADERS / FEEDER_FX)):
                     if name not in assets:
                         raise InstallError(
                             f"The DLSS5-Feeder release {tag} has no {name}.")
                     _copy(dl(assets[name], f"{tag}-{name}"), dest, rep, root)
-                log(f"      DLSS5-Feeder {tag}")
+                log(f"      DLSS5-Feeder {tag} ({game_addon})")
                 rep.components["feeder"] = tag
 
             if opt.provider in (3, 4):
@@ -571,6 +578,33 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
                 rep.components["lumenite"] = "mainline"
 
         # --- 3) the DLSS parts --------------------------------------------
+        # On a 32-bit game every 64-bit component lives in host64\ instead of
+        # beside the game, because it is loaded by the helper process, not by
+        # the game. The helper needs its OWN complete stack: a 64-bit ReShade
+        # as dxgi.dll, renodx-dlss5.addon64 and the NGX runtimes. Writing
+        # those next to a 32-bit game would leave files 32-bit ReShade cannot
+        # load and the helper cannot find.
+        dlss_root = root if bitness == 64 else root / HOST64_DIR
+        if dlss_root is not root:
+            dlss_root.mkdir(parents=True, exist_ok=True)
+
+            begin("host64 helper")
+            tag, assets = sources.resolve_feeder()
+            if FEEDER_HOST64 not in assets:
+                raise InstallError(
+                    f"The DLSS5-Feeder release {tag} has no {FEEDER_HOST64}, "
+                    f"which the 32-bit path cannot work without.")
+            if FEEDER_HOST64 in local:
+                _copy(local[FEEDER_HOST64], dlss_root / FEEDER_HOST64, rep, root)
+            else:
+                _copy(dl(assets[FEEDER_HOST64], f"{tag}-{FEEDER_HOST64}"),
+                      dlss_root / FEEDER_HOST64, rep, root)
+            # The helper is a separate 64-bit ReShade process of its own.
+            _place(extract_member(setup, "ReShade64.dll"),
+                   dlss_root / PROXY_DLL, rep, root)
+            log(f"      {FEEDER_HOST64} + 64-bit ReShade in {HOST64_DIR}\\")
+            rep.components["host64"] = tag
+
         catalog = None
 
         def cat():
@@ -585,20 +619,20 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
 
         begin("DLSS 5 add-on")
         if RENODX in local and not opt.renodx_version:
-            _copy(local[RENODX], root / RENODX, rep, root)
+            _copy(local[RENODX], dlss_root / RENODX, rep, root)
             log(f"      {RENODX} (local file)")
             rep.components["renodx"] = "local"
         else:
             e = sources.pick(cat()["renodx"], opt.renodx_version)
             f = dl(e["url"], f"renodx-{e['label']}.zip")
-            _place(extract_member(f, ".addon64"), root / RENODX, rep, root)
+            _place(extract_member(f, ".addon64"), dlss_root / RENODX, rep, root)
             log(f"      renodx-dlss5 {e['label']}")
             rep.components["renodx"] = e["label"]
 
         begin("DLSS5Kit control panel")
         kit = bundled_kit_addon()
         if kit is not None:
-            _copy(kit, root / KIT_ADDON, rep, root)
+            _copy(kit, dlss_root / KIT_ADDON, rep, root)
             log(f"      {KIT_ADDON} (in-game SR/RR preset + NR resolution tab)")
             rep.components["kit_addon"] = "bundled"
         else:
@@ -617,8 +651,8 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
         rep.components["generation"] = card.generation
 
         if DLSSNR in local and not opt.dlssnr_version:
-            _copy(local[DLSSNR], root / DLSSNR, rep, root)
-            compat, why = gpu.check(root / DLSSNR, sm)
+            _copy(local[DLSSNR], dlss_root / DLSSNR, rep, root)
+            compat, why = gpu.check(dlss_root / DLSSNR, sm)
             log(f"      {DLSSNR} (local file)")
             log(f"      GPU check: {why}")
             rep.components["dlssnr"] = "local"
@@ -642,8 +676,8 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
                           if opt.dlssnr_version else cat()["dlssnr"])
             for e in candidates:
                 f = dl(e["url"], f"dlssnr-{e['label']}.zip")
-                _place(extract_member(f, DLSSNR), root / DLSSNR, rep, root)
-                compat, why = gpu.check(root / DLSSNR, sm)
+                _place(extract_member(f, DLSSNR), dlss_root / DLSSNR, rep, root)
+                compat, why = gpu.check(dlss_root / DLSSNR, sm)
                 if compat is False and not opt.ignore_gpu_mismatch:
                     if opt.dlssnr_version:
                         raise InstallError(
@@ -680,8 +714,8 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
         # neural pass runs against a years-old runtime. The game's original is
         # copied to nvngx_dlss.dll.dlss5kit-backup first and restored by
         # Remove, so nothing is lost.
-        replacing_game_file = ((root / DLSS).is_file()
-                               and _rel(root / DLSS, root) not in rep.written)
+        replacing_game_file = ((dlss_root / DLSS).is_file()
+                               and _rel(dlss_root / DLSS, root) not in rep.written)
         if replacing_game_file:
             if api.uses_ngx:
                 log("      updating the game's own nvngx_dlss.dll (backed up, "
@@ -690,17 +724,17 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
                 log("      replacing a stray nvngx_dlss.dll (this game does "
                     "not call NGX, so it is not the game's own)")
         if DLSS in local and not opt.dlss_version:
-            _copy(local[DLSS], root / DLSS, rep, root)
+            _copy(local[DLSS], dlss_root / DLSS, rep, root)
             log(f"      {DLSS} (local file)")
             rep.components["dlss"] = "local"
-            _warn_dlss_gpu(root / DLSS, sm, card, rep, log)
+            _warn_dlss_gpu(dlss_root / DLSS, sm, card, rep, log)
         else:
             e = sources.pick(cat()["dlss"], opt.dlss_version)
             f = dl(e["url"], f"dlss-{e['label']}.zip")
-            _place(extract_member(f, DLSS), root / DLSS, rep, root)
+            _place(extract_member(f, DLSS), dlss_root / DLSS, rep, root)
             log(f"      nvngx_dlss {e['label']}")
             rep.components["dlss"] = e["label"]
-            _warn_dlss_gpu(root / DLSS, sm, card, rep, log)
+            _warn_dlss_gpu(dlss_root / DLSS, sm, card, rep, log)
 
         # --- 4) configuration ---------------------------------------------
         begin("ReShade configuration")
@@ -725,6 +759,16 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
             if "ReShade.ini" not in rep.written:
                 rep.written.append("ReShade.ini")
             log("      add-on loading enabled (this route needs no shaders)")
+
+        # The helper is its own ReShade process and reads its own config; a
+        # minimal one is enough, it loads add-ons and runs no shaders.
+        if dlss_root is not root:
+            _backup(dlss_root / "ReShade.ini", rep, root)
+            config.write_reshade_ini(dlss_root, None)
+            rel_ini = _rel(dlss_root / "ReShade.ini", root)
+            if rel_ini not in rep.written:
+                rep.written.append(rel_ini)
+            log(f"      {HOST64_DIR}\\ReShade.ini (helper's own config)")
 
         if route == FEEDER:
             begin("dlss5-feed.cfg")
@@ -856,9 +900,13 @@ def status(game_dir: Path) -> dict:
     man = read_manifest(root)
     present = {
         "ReShade": is_reshade(root / PROXY_DLL) or is_reshade(root / OPENGL_PROXY),
-        "DLSS 5 add-on": (root / RENODX).is_file(),
-        "nvngx_dlssnr": (root / DLSSNR).is_file(),
-        "nvngx_dlss": (root / DLSS).is_file(),
+        # 64-bit parts live in host64\ on a 32-bit install.
+        "DLSS 5 add-on": ((root / RENODX).is_file()
+                          or (root / HOST64_DIR / RENODX).is_file()),
+        "nvngx_dlssnr": ((root / DLSSNR).is_file()
+                         or (root / HOST64_DIR / DLSSNR).is_file()),
+        "nvngx_dlss": ((root / DLSS).is_file()
+                       or (root / HOST64_DIR / DLSS).is_file()),
         "bridge": (root / BRIDGE_ADDON).is_file(),
         "feeder": (root / FEEDER_ADDON).is_file(),
     }

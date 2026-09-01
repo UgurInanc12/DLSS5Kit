@@ -145,11 +145,35 @@ def choose(folder: Path, api: peinfo.ApiInfo, bitness: int,
         return p
 
     if bitness != 64:
+        # 32-bit is supported ONLY through the feeder's cross-process host:
+        # NGX exists as x64 only, and 32-bit ReShade loads .addon32 only, so
+        # neither the DLSS 5 add-on nor the bridge can live in the game. The
+        # feeder splits at the shared-NT-handle seam it already uses between
+        # devices: dlss5-feed.addon32 in the game copies frames into shared
+        # textures, and host64\dlss5-feed-host64.exe (a full 64-bit ReShade +
+        # renodx stack of its own) does the DLSS work. Upstream lists it as
+        # beta with Splinter Cell: Blacklist and BioShock Remastered verified.
+        if api.api in (peinfo.DX11, peinfo.DX12):
+            p.route = FEEDER
+            p.supported = True
+            p.reason = ("32-bit game: the feeder runs its DLSS work in a "
+                        "separate 64-bit helper process (host64\\), because "
+                        "NGX and the DLSS 5 add-on are 64-bit only. Frames "
+                        "cross the process boundary as shared GPU textures, "
+                        "not through system memory.")
+            p.options = []
+            p.warnings.append(
+                "The 32-bit path is upstream beta. The helper opens its own "
+                "window titled \"32-bit DLSS 5 Feeder\" - that is where the "
+                "DLSS 5 add-on's own panel lives; press Home there.")
+            return p
+
         p.supported = False
-        p.blocker = ("32-bit games are not supported. Every component here - "
-                     "the DLSS 5 add-on, the bridge, the NGX runtimes - is "
-                     "64-bit only, and the cross-process helper the feeder "
-                     "would need is out of scope for this tool.")
+        p.blocker = ("32-bit games are only supported on D3D11 or D3D12, "
+                     f"through the feeder's 64-bit helper process. This one "
+                     f"reports {api.api}, which has no path: the DLSS 5 "
+                     "add-on, the bridge and the NGX runtimes are all 64-bit "
+                     "and D3D11/D3D12 only.")
         # RTX Remix is a special case worth naming, because the plain
         # "32-bit" answer is misleading: the game process is 32-bit but the
         # process that actually renders is a separate 64-bit one, and the

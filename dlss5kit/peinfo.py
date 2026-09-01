@@ -625,6 +625,23 @@ def _score(exe: Path, folder: Path) -> float:
     # refused the install as 32-bit-only. These names are never a game.
     if stem in _ENGINE_TOOLS:
         s -= 1200
+
+    # Prefer a 64-bit executable when the folder offers both. CryEngine-era
+    # games ship Bin32/ and Bin64/ with the SAME file name, and Crysis (2007)
+    # additionally keeps a 32-bit Crysis.exe inside Bin64/ next to the real
+    # 64-bit Crysis64.exe - so the path says nothing and only the PE header
+    # settles it. Measured 2026-09-02: without this, Bin64\Crysis.exe (32-bit,
+    # 9.4 MB) outscored Crysis64.exe (64-bit, 53 KB) purely on file size and
+    # the game was routed as 32-bit.
+    try:
+        if exe_bitness(exe) == 64:
+            s += 500
+    except PEError:
+        pass
+
+    # Dedicated servers render nothing.
+    if "dedicatedserver" in stem.replace("_", "") or stem.endswith("server"):
+        s -= 1100
     try:
         mb = exe.stat().st_size / (1024 * 1024)
         s += min(mb, 300) * 1.2

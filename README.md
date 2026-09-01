@@ -335,8 +335,14 @@ a reasonable choice and the tool works identically.
 - Prefer borderless over exclusive fullscreen.
 - Neural rendering costs several milliseconds. On the feeder route the
   performance dial is `work_resolution` (50-100%), not a DLSS quality mode.
-- 32-bit games, DirectX 9 and DirectX 10 are refused with a reason rather than
-  half-attempted.
+- **32-bit D3D11/D3D12 games work**, through DLSS5-Feeder's cross-process
+  design: a 32-bit add-on inside the game hands frames to a 64-bit helper in
+  `host64\` over shared GPU textures, because NGX and the DLSS 5 add-on exist
+  only as 64-bit code. The tool installs both halves. Upstream calls this path
+  beta; the helper opens its own window titled "32-bit DLSS 5 Feeder", and
+  that is where the DLSS 5 add-on's panel lives.
+- DirectX 9, DirectX 10, 32-bit on any other API, and RTX Remix titles are
+  refused with a reason rather than half-attempted.
 
 ## After installing
 

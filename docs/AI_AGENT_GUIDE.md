@@ -209,9 +209,21 @@ run aborts partway, so `--remove` cleans up whatever landed. Always offer it.
 
 ### Exit 3 (not supported)
 
-Read `blocker` and relay it. The three cases are 32-bit games, DirectX 9/10,
-and a GPU below RTX 20. None of them are retryable, and none are bugs. Do not
-try flags to force past them.
+Read `blocker` and relay it. The cases are DirectX 9/10, a GPU below RTX 20,
+32-bit games on an API other than D3D11/D3D12, and RTX Remix titles (the
+blocker names Remix explicitly - the game shell is 32-bit but rendering runs
+in a separate 64-bit Vulkan process, and Remix already does its own path
+tracing with DLSS). None are retryable, none are bugs. Do not try flags to
+force past them.
+
+**32-bit D3D11/D3D12 games ARE supported**, via `feeder`. DLSS5-Feeder splits
+the work across processes: `dlss5-feed.addon32` runs inside the 32-bit game
+and hands frames over as shared GPU textures, while everything 64-bit (a
+second ReShade, the DLSS 5 add-on, the NGX runtimes and
+`dlss5-feed-host64.exe`) is installed into a `host64\` subfolder and runs as
+a helper process. Tell the user two things: the path is upstream beta, and the
+helper opens its own window titled "32-bit DLSS 5 Feeder" where the DLSS 5
+add-on's own panel lives (press Home there, not in the game).
 
 ---
 
