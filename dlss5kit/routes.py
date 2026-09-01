@@ -206,7 +206,23 @@ def choose(folder: Path, api: peinfo.ApiInfo, bitness: int,
                         "parts, less proven.")
         return p
 
-    # DX11 or an unidentified DXGI renderer.
+    if api.api == peinfo.UNKNOWN:
+        # Nothing identified the renderer. Do not silently take the D3D11
+        # branch: say so, and prefer the feeder, which is the only route that
+        # does not depend on knowing the API (it rides ReShade's own output).
+        p.route = FEEDER
+        p.options = [FEEDER, BRIDGE, NATIVE]
+        p.reason = ("The graphics API could not be identified from the "
+                    "executable, so no route can be chosen on evidence. The "
+                    "feeder is the safest default because it works wherever "
+                    "ReShade attaches at all, whatever the renderer.")
+        p.warnings.append(
+            "Run the game once with this installed, then press 'Did it work?' "
+            "or re-inspect: ReShade.log will then record the real device calls "
+            "and the correct route can be chosen.")
+        return p
+
+    # DX11 or an identified DXGI renderer.
     if p.native_dlss:
         p.route = BRIDGE
         p.options = [BRIDGE, FEEDER]

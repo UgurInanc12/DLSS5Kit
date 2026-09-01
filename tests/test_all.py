@@ -785,6 +785,66 @@ def test_bridge_private_device_does_not_flip_the_verdict():
               routes.choose(d2, info2, 64).route == routes.NATIVE)
 
 
+def test_uppercase_module_names_and_ngx_evidence():
+    """A game that stores "D3D12", not "d3d12.dll", must still be seen.
+
+    Measured on Metro Exodus Enhanced Edition 2026-09-01: the executable has
+    zero occurrences of "d3d12.dll" or "dxgi.dll" in any case. It carries the
+    bare uppercase "D3D12" 26 times, D3D12CreateDevice once, and
+    NVSDK_NGX_D3D12_* 21 times. A lower-case-filename-only scan reported "no
+    graphics API could be identified" and the route fell through to the D3D11
+    default, recommending bridge for a D3D12-only game.
+
+    The second half guards the fix's own trap: NGX ships parameter names like
+    NVSDK_NGX_Parameter_GetD3d11Resource in EVERY NGX game whatever its
+    renderer, so a loose case-insensitive "d3d11" search counts those as D3D11
+    evidence and flips the verdict straight back.
+    """
+    print("\n[uppercase module names and NGX as renderer evidence]")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        # The Metro shape: uppercase bare name + entry point + NGX D3D12, and
+        # the NGX parameter strings that contain a lower-case "d3d11".
+        metro = make_pe(d / "MetroExodus.exe", peinfo.PE_X64, extra=(
+            b"\x00D3D12\x00" * 3
+            + b"D3D12CreateDevice\x00"
+            + b"CreateDXGIFactory\x00"
+            + b"NVSDK_NGX_D3D12_CreateFeature\x00" * 4
+            + b"NVSDK_NGX_Parameter_GetD3d11Resource\x00"
+            + b"NVSDK_NGX_Parameter_SetD3d11Resource\x00"))
+        s = peinfo.scan_strings(metro)
+        check("D3D12 entry point counted", s.get("d3d12", 0) > 0, str(s))
+        check("NGX D3D12 counted", s.get("ngx_d3d12", 0) == 4, str(s))
+        check("NGX d3d11 parameter names are NOT counted as D3D11",
+              s.get("d3d11", 0) == 0, str(s))
+
+        info = peinfo.detect_api(metro, d)
+        check("detected as DX12", info.api == peinfo.DX12,
+              f"{info.api} / {info.reason}")
+        check("confidence is high", info.confidence == "high", info.confidence)
+        check("the reason cites the NGX entry point",
+              "NVSDK_NGX_D3D12" in info.reason, info.reason)
+
+        (d / "nvngx_dlss.dll").write_bytes(b"x")
+        plan = routes.choose(d, info, 64)
+        check("routed to native, not bridge", plan.route == routes.NATIVE,
+              plan.route)
+
+    # A truly unidentifiable executable must say so, not default to D3D11.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        blank = make_pe(d / "Mystery.exe", peinfo.PE_X64, extra=b"nothing here")
+        info = peinfo.detect_api(blank, d)
+        check("unknown stays unknown", info.api == peinfo.UNKNOWN, info.api)
+        plan = routes.choose(d, info, 64)
+        check("unknown API falls back to feeder, not bridge",
+              plan.route == routes.FEEDER, plan.route)
+        check("and it says the API is unknown",
+              "could not be identified" in plan.reason, plan.reason)
+        check("and it tells the user how to resolve it",
+              any("ReShade.log" in w for w in plan.warnings), str(plan.warnings))
+
+
 def main() -> int:
     print("DLSS5Kit offline tests")
     test_ini()
@@ -793,6 +853,7 @@ def main() -> int:
     test_pe()
     test_api_detection_from_strings()
     test_api_from_log_wins()
+    test_uppercase_module_names_and_ngx_evidence()
     test_bridge_private_device_does_not_flip_the_verdict()
     test_generations_and_ptx()
     test_native_dlss_veto()

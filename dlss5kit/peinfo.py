@@ -187,13 +187,68 @@ _SCAN_TOKENS = {
     "nvngx": b"nvngx",
 }
 
+# Entry-point names, which are exported symbols and therefore exact. A game
+# that resolves its renderer with GetProcAddress carries these even when it
+# never stores the DLL file name in a form the token scan above would match.
+#
+# Measured on Metro Exodus Enhanced Edition 2026-09-01: the executable
+# contains ZERO occurrences of "d3d12.dll" or "dxgi.dll" in any case, because
+# it stores the module name as the bare uppercase string "D3D12" (26 times).
+# A scan for lower-case file names alone reports "no graphics API could be
+# identified" for a game that is D3D12-only, and the route then falls through
+# to the D3D11 default - which is wrong twice over.
+_SCAN_ENTRYPOINTS = {
+    "d3d12": (b"D3D12CreateDevice",),
+    "d3d11": (b"D3D11CreateDevice", b"D3D11CreateDeviceAndSwapChain"),
+    "d3d10": (b"D3D10CreateDevice",),
+    "d3d9": (b"Direct3DCreate9",),
+    "dxgi": (b"CreateDXGIFactory",),
+    "vulkan": (b"vkCreateInstance", b"vkGetInstanceProcAddr"),
+    "opengl": (b"wglCreateContext",),
+}
+
+# Bare module names, matched case-insensitively as a last resort. Only the
+# forms that carry a delimiter, because a naked "d3d11" matches things that
+# are not renderer references at all.
+#
+# Measured on Metro Exodus Enhanced Edition 2026-09-01: a case-insensitive
+# search for "d3d11" hits twice, and BOTH hits are inside NGX parameter names:
+#     NVSDK_NGX_Parameter_GetD3d11Resource
+#     NVSDK_NGX_Parameter_SetD3d11Resource
+# Those strings ship with every NGX-using game regardless of its renderer, so
+# counting them as D3D11 evidence made a D3D12-only game report as D3D11.
+_SCAN_BARE = {
+    "d3d12": (b"\x00d3d12\x00", b"d3d12.dll"),
+    "d3d11": (b"\x00d3d11\x00", b"d3d11.dll"),
+    "d3d10": (b"\x00d3d10\x00", b"d3d10.dll"),
+    "vulkan": (b"vulkan-1",),
+    "opengl": (b"opengl32",),
+}
+
+
+def _count(data, token: bytes, limit: int = 1000) -> int:
+    n, off = 0, 0
+    while n < limit:
+        i = data.find(token, off)
+        if i < 0:
+            break
+        n += 1
+        off = i + len(token)
+    return n
+
 
 def scan_strings(path: Path) -> dict[str, int]:
-    """Count marker strings inside the executable.
+    """Count renderer and NGX markers inside the executable.
 
-    Catches renderers and NGX entry points reached through LoadLibrary /
-    GetProcAddress, which the import table cannot show. Memory-mapped, so a
-    500 MB executable costs no resident memory.
+    Catches renderers reached through LoadLibrary / GetProcAddress, which the
+    import table cannot show. Three tiers, because game executables spell
+    these differently:
+
+        1. lower-case DLL file names   ("d3d12.dll")
+        2. exported entry points       ("D3D12CreateDevice") - exact, reliable
+        3. bare module names, any case ("D3D12") - last resort
+
+    Memory-mapped, so a 500 MB executable costs no resident memory.
     """
     counts = {k: 0 for k in _SCAN_TOKENS}
     try:
@@ -204,15 +259,23 @@ def scan_strings(path: Path) -> dict[str, int]:
                 data = fh.read()
             try:
                 for key, tok in _SCAN_TOKENS.items():
-                    off = 0
-                    n = 0
-                    while n < 1000:
-                        i = data.find(tok, off)
-                        if i < 0:
-                            break
-                        n += 1
-                        off = i + len(tok)
-                    counts[key] = n
+                    counts[key] = _count(data, tok)
+
+                # Tier 2: entry points. Their presence is proof the API is used.
+                for key, toks in _SCAN_ENTRYPOINTS.items():
+                    hits = sum(_count(data, t) for t in toks)
+                    if hits:
+                        counts[key] = counts.get(key, 0) + hits
+
+                # Tier 3: bare names, case-insensitive, only where still zero.
+                need = [k for k in _SCAN_BARE if not counts.get(k)]
+                if need:
+                    try:
+                        lower = bytes(data[:]).lower()
+                    except Exception:
+                        lower = b""
+                    for key in need:
+                        counts[key] = sum(_count(lower, t) for t in _SCAN_BARE[key])
             finally:
                 if hasattr(data, "close"):
                     data.close()
@@ -339,9 +402,25 @@ def detect_api(exe: Path, folder: Path | None = None) -> ApiInfo:
         info.api, info.reason, info.confidence = DX11, "imports d3d11.dll statically", "high"
         return info
 
-    # Tier 3: LoadLibrary targets. A game that statically imports d3d10 but
-    # carries a d3d11.dll string is a D3D11 game with a legacy import left in
-    # (Crysis 3 Remastered is exactly this).
+    # Tier 3: LoadLibrary targets found in the string table.
+    #
+    # The NGX entry point is checked FIRST here, because it is an exact,
+    # unambiguous symbol while the module-name strings are fuzzy.
+    # NVSDK_NGX_D3D12_* can only be called by a D3D12 renderer.
+    if info.ngx_d3d12 and not info.ngx_d3d11:
+        info.api, info.reason, info.confidence = (
+            DX12,
+            f"calls NVSDK_NGX_D3D12_* {s.get('ngx_d3d12', 0)} time(s), which "
+            f"only a D3D12 renderer can do",
+            "high")
+        return info
+    if info.ngx_d3d11 and not info.ngx_d3d12:
+        info.api, info.reason, info.confidence = (
+            DX11,
+            f"calls NVSDK_NGX_D3D11_* {s.get('ngx_d3d11', 0)} time(s)",
+            "high")
+        return info
+
     if s.get("d3d12", 0) and not s.get("d3d11", 0):
         info.api, info.reason, info.confidence = (
             DX12, "loads d3d12.dll at runtime (string table)", "medium")
@@ -359,6 +438,7 @@ def detect_api(exe: Path, folder: Path | None = None) -> ApiInfo:
     if has_imp("d3d10.dll") or has_imp("d3d10_1.dll") or has_imp("d3d10core.dll"):
         info.api, info.reason, info.confidence = DX10, "imports d3d10.dll statically", "medium"
         return info
+
     if has_imp("dxgi.dll") or s.get("dxgi", 0):
         info.api, info.reason, info.confidence = (
             DX11, "uses DXGI without a static d3d11/d3d12 import", "low")
