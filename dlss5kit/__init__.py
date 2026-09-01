@@ -5,4 +5,4 @@ rest from the original publishers. Everything it writes is recorded in a
 manifest so uninstall puts the folder back exactly as it was.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"

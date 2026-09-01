@@ -25,6 +25,11 @@ arguments.
 Supported: Windows, NVIDIA RTX 20, 30, 40 and 50 series, 64-bit DX11/DX12 and
 Vulkan games.
 
+**Using an AI assistant instead of the window?** Point it at
+**[AGENTS.md](AGENTS.md)**: the commands, the `--check --json` schema, the
+exit codes, every failure and its fix, and how to read `--diagnose` when
+nothing seems to have happened. You never have to open the GUI.
+
 > **This repository contains no game files, no NVIDIA binaries and no
 > third-party redistributables.** It is installer logic only. Everything it
 > needs is downloaded at run time from the original publishers. See

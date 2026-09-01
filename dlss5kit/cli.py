@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -80,6 +81,57 @@ def _print_gpu_report() -> int:
     return 0
 
 
+def _inspection_dict(game_dir: Path, exe: Path, cands: list[Path],
+                     api: peinfo.ApiInfo, bits: int, plan: routes.Plan,
+                     card: gpu.Card) -> dict:
+    """Everything an automated caller needs, as plain data.
+
+    This is the contract --json prints. Keep the key names stable: agents and
+    scripts parse them, and a rename is a breaking change.
+    """
+    st = installer.status(game_dir)
+    return {
+        "schema": 1,
+        "tool": "dlss5kit",
+        "version": __version__,
+        "folder": str(game_dir),
+        "executable": exe.name,
+        "executable_path": str(exe),
+        "exe_candidates": [c.name for c in cands],
+        "bitness": bits,
+        "api": api.api,
+        "api_confidence": api.confidence,
+        "api_reason": api.reason,
+        "ngx": {
+            "d3d11": api.ngx_d3d11,
+            "d3d12": api.ngx_d3d12,
+            "vulkan": api.ngx_vulkan,
+            "any": api.uses_ngx,
+        },
+        "native_dlss": plan.native_dlss,
+        "dlss_evidence": plan.dlss_evidence,
+        "dlss_note": plan.dlss_note,
+        "gpu": {
+            "name": card.name,
+            "generation": card.generation,
+            "sm": card.sm,
+            "detected": card.detected,
+            "supported": card.supported,
+        },
+        "supported": plan.supported,
+        "blocker": plan.blocker,
+        "route": plan.route if plan.supported else None,
+        "route_reason": plan.reason,
+        "route_options": plan.options,
+        "warnings": plan.warnings,
+        "installed": st["installed"],
+        "installed_route": st["route"],
+        "install_complete": st["complete"],
+        "components": st["components"],
+        "present": st["present"],
+    }
+
+
 def _print_inspection(game_dir: Path, exe: Path, cands: list[Path],
                       api: peinfo.ApiInfo, bits: int, plan: routes.Plan,
                       card: gpu.Card) -> None:
@@ -123,13 +175,18 @@ def _print_inspection(game_dir: Path, exe: Path, cands: list[Path],
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="dlss5kit",
-        description="One-click DLSS 5 neural rendering setup for PC games.")
+        description="One-click DLSS 5 neural rendering setup for PC games.",
+        epilog="Exit codes: 0 ok, 1 install failed, 2 bad path or unreadable "
+               "executable, 3 game not supported, 4 diagnosis says it is not "
+               "working.")
     p.add_argument("target", nargs="?", help="game folder or .exe")
     p.add_argument("--gui", action="store_true", help="open the window")
     p.add_argument("--gpu", action="store_true",
                    help="show the detected card and which builds support it")
     p.add_argument("--check", action="store_true",
                    help="inspect only, write nothing")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable output for --check and --diagnose")
     p.add_argument("--diagnose", action="store_true",
                    help="read the logs back and report")
     p.add_argument("--remove", action="store_true", help="uninstall")
@@ -149,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="replace the game's own nvngx_dlss.dll (backed up)")
     p.add_argument("--ignore-gpu-mismatch", action="store_true",
                    help="install even when the build has no code for your card")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="accepted for scripting; this CLI never prompts anyway")
     p.add_argument("--version", action="version", version=f"dlss5kit {__version__}")
     a = p.parse_args(argv)
 
@@ -164,34 +223,64 @@ def main(argv: list[str] | None = None) -> int:
     try:
         exe, cands = peinfo.resolve_target(target)
     except peinfo.PEError as e:
-        print(f"error: {e}", file=sys.stderr)
+        if a.json:
+            print(json.dumps({"schema": 1, "ok": False, "error": str(e)}, indent=2))
+        else:
+            print(f"error: {e}", file=sys.stderr)
         return 2
     game_dir = exe.parent
 
     if a.remove:
-        for line in installer.uninstall(game_dir):
-            print(line)
+        lines = installer.uninstall(game_dir)
+        if a.json:
+            print(json.dumps({"schema": 1, "ok": True, "action": "remove",
+                              "log": lines}, indent=2))
+        else:
+            for line in lines:
+                print(line)
         return 0
 
     if a.diagnose:
         st = installer.status(game_dir)
-        print(diagnose.format_text(diagnose.diagnose(game_dir, st.get("route"))))
-        return 0
+        d = diagnose.diagnose(game_dir, st.get("route"))
+        if a.json:
+            print(json.dumps({
+                "schema": 1,
+                "action": "diagnose",
+                "verdict": d.verdict,
+                "summary": d.summary,
+                "installed_route": st.get("route"),
+                "findings": [{"level": f.level, "text": f.text,
+                              "evidence": f.evidence} for f in d.findings],
+            }, indent=2))
+        else:
+            print(diagnose.format_text(d))
+        return 4 if d.verdict == diagnose.BAD else 0
 
     try:
         bits = peinfo.exe_bitness(exe)
     except peinfo.PEError as e:
-        print(f"error: {e}", file=sys.stderr)
+        if a.json:
+            print(json.dumps({"schema": 1, "ok": False, "error": str(e)}, indent=2))
+        else:
+            print(f"error: {e}", file=sys.stderr)
         return 2
     card = _resolve_card(a.generation)
     api = peinfo.detect_api(exe, game_dir)
     plan = routes.choose(game_dir, api, bits, card)
 
-    _print_inspection(game_dir, exe, cands, api, bits, plan, card)
     if a.check:
-        return 0
+        if a.json:
+            print(json.dumps(
+                _inspection_dict(game_dir, exe, cands, api, bits, plan, card),
+                indent=2))
+        else:
+            _print_inspection(game_dir, exe, cands, api, bits, plan, card)
+        return 0 if plan.supported else 3
+
+    _print_inspection(game_dir, exe, cands, api, bits, plan, card)
     if not plan.supported:
-        return 1
+        return 3
 
     opt = installer.Options(
         route=a.route or "",

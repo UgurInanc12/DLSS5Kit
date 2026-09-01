@@ -26,6 +26,12 @@ jobs:
       - name: Run the offline test suite
         run: python tests/test_all.py
 
+      # AGENTS.md is a contract for automated callers: a drifted flag or exit
+      # code there is worse than no document, so it is checked against the
+      # real CLI on every push.
+      - name: Check AGENTS.md against the real CLI
+        run: python tests/test_agents_doc.py
+
       - name: Build the executable
         run: |
           python -m pip install --upgrade pip
