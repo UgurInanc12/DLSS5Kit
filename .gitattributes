@@ -1,0 +1,13 @@
+# Keep LF in the repository regardless of the checkout platform.
+* text=auto eol=lf
+
+# Windows-only scripts want CRLF on disk.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never touch binaries.
+*.exe binary
+*.dll binary
+*.png binary
+*.ico binary
