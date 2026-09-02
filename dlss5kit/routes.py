@@ -133,11 +133,36 @@ def detect_native_dlss(folder: Path,
     return True, evidence, ""
 
 
+def anticheat_warning(folder: Path) -> str:
+    """The anti-cheat caution for this game, or "" if it ships none.
+
+    This belongs in the INSPECTION, not only in the install. --check is what
+    agents and scripts read (AGENTS.md tells them to branch on `warnings`),
+    and it reported an empty list for Watch Dogs 2, which ships Easy
+    Anti-Cheat, because the detector only ran inside install(). A silent ban
+    risk is the one thing that must never wait until the files are written.
+    """
+    from . import installer
+    if folder is None:
+        return ""
+    name, evidence = installer.detect_anticheat(installer.install_root(folder))
+    if not name:
+        return ""
+    return (f"{name} detected ({', '.join(evidence[:4])}). ReShade add-ons "
+            f"and anti-cheat do not coexist: expect the game not to start, "
+            f"or nothing to happen, or a ban. Do not use this online.")
+
+
 def choose(folder: Path, api: peinfo.ApiInfo, bitness: int,
            card: "gpu.Card | None" = None) -> Plan:
     """Pick the route, and say why in words a person can act on."""
     p = Plan()
     p.native_dlss, p.dlss_evidence, p.dlss_note = detect_native_dlss(folder, api)
+
+    # Raised first so that every early return below still carries it.
+    ac = anticheat_warning(folder)
+    if ac:
+        p.warnings.append(ac)
 
     if card is not None and not card.supported:
         p.supported = False

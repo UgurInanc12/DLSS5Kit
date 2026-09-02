@@ -48,6 +48,11 @@ _SKIP_PARTS = (
     "unitycrashhandler", "ue4prereqsetup", "ue5prereqsetup", "epicwebhelper",
     "dxc", "shadercompile", "benchmark", "launcher", "downloader", "updater",
     "patcher", "repair", "diagnostic", "reporter", "bugtrap", "jirabugtrap",
+    # A settings dialog shipped beside the game. Measured on Far Cry (2004):
+    # FarCryConfigurator.exe outscored FarCry.exe because it too matched the
+    # folder name, so --check named a configurator as the game and read DX9
+    # off it.
+    "configurator", "config", "settings", "options",
 )
 
 _PRUNE_DIRS = {
@@ -69,6 +74,12 @@ _ENGINE_TOOLS = {
     "hammer", "hammerplusplus", "hammer_run_map_launcher", "propper",
     "hammerplusplus_compiler", "glview", "height2ssbump", "vtex", "vtf2tga",
     "captioncompiler", "motionmapper", "qc_eyes", "phonemeextractor",
+    # CryEngine 1 ships its whole toolchain in Bin32/ beside the game.
+    # Measured on Far Cry (2004): rc.exe (the resource compiler, 0.11 MB)
+    # outranked FarCry.exe because "rc" is a substring of "farcry" and so
+    # collected the folder-name bonus.
+    "rc", "cgc", "cgfdump", "luacompiler", "fxc", "editor", "sandbox",
+    "resourcecompiler", "lmtool", "polybump",
 }
 
 
@@ -410,15 +421,45 @@ def api_from_neighbour_dlls(folder: Path) -> tuple[str | None, str]:
     except OSError:
         return None, ""
 
-    # A module whose FILE NAME states the API is the strongest hint here.
-    for n in names:
-        if "dx12" in n or "d3d12" in n:
-            return DX12, f"a renderer module beside the executable is named {n}"
-        if "vulkan" in n or n.startswith("vk"):
-            return VULKAN, f"a renderer module beside the executable is named {n}"
-    for n in names:
-        if "dx11" in n or "d3d11" in n:
-            return DX11, f"a renderer module beside the executable is named {n}"
+    # Helper libraries name an API in their FILE NAME without being the
+    # renderer. Measured on Watch Dogs 2 2026-09-02: bin/ holds NVIDIA's
+    # GameWorks helpers GFSDK_ShadowLib_DX11.win64.dll (2.5 MB) and
+    # GFSDK_SSAO_D3D11.win64.dll (1.2 MB) beside the actual engine
+    # Disrupt_64.dll (138.9 MB). Returning on the first name containing
+    # "dx11" credited a shadow-mapping helper as the renderer - the right
+    # answer for the wrong reason, and the wrong answer on any title whose
+    # helper targets a different API than its renderer.
+    helper = ("gfsdk_", "nvapi", "nvtt", "amd_ags", "d3dcompiler_",
+              "d3dx9_", "d3dx10_", "d3dx11_", "nvcamera", "anselsdk",
+              "physx", "apex_", "nvblast", "nvcloth", "nvtoolsext",
+              "openvr_", "steamvr", "libovr", "dxil", "dxcompiler")
+    engine_names = {n: p for n, p in names.items()
+                    if not any(n.startswith(h) or h in n for h in helper)}
+
+    # A module whose FILE NAME states the API is a strong hint, but only when
+    # the module is plausibly the renderer. Prefer the largest such module so
+    # a 30 MB engine outranks a 1 MB satellite.
+    def _by_size(cands: list[str]) -> str | None:
+        if not cands:
+            return None
+        try:
+            return max(cands, key=lambda n: engine_names[n].stat().st_size)
+        except OSError:
+            return cands[0]
+
+    d12 = _by_size([n for n in engine_names if "dx12" in n or "d3d12" in n])
+    if d12:
+        return DX12, f"a renderer module beside the executable is named {d12}"
+    vkn = _by_size([n for n in engine_names
+                    if "vulkan" in n or n.startswith("vk")])
+    if vkn:
+        return VULKAN, f"a renderer module beside the executable is named {vkn}"
+    d11 = _by_size([n for n in engine_names if "dx11" in n or "d3d11" in n])
+    if d11:
+        return DX11, f"a renderer module beside the executable is named {d11}"
+
+    # No module announces an API in its name. The engine-specific rules below
+    # get first refusal; the generic biggest-module scan is the last resort.
 
     # Engine runtimes: scan the module itself, it holds the real strings.
     #
@@ -446,6 +487,46 @@ def api_from_neighbour_dlls(folder: Path) -> tuple[str | None, str]:
                          f"Direct3D is the Windows default")
         if vk:
             return VULKAN, f"{engine} is predominantly Vulkan (x{vk})"
+
+    # Last resort: no name announced an API and no known engine runtime is
+    # here, so read the biggest neighbouring module. Measured on Watch Dogs 2
+    # 2026-09-02: Disrupt_64.dll (138.9 MB) imports d3d11.dll, d3d9.dll and
+    # dxgi.dll and no d3d12 - evidence from the renderer itself rather than
+    # from a satellite whose file name happens to carry an API.
+    return _api_from_biggest_module(engine_names)
+
+
+def _api_from_biggest_module(names: dict[str, Path]) -> tuple[str | None, str]:
+    """Read the renderer out of the largest neighbouring DLL.
+
+    The engine module is by far the biggest file beside the executable, and
+    its own import table is real evidence. Only the Direct3D/Vulkan split is
+    decided here: the import table is definitive about what the module links
+    against, so counts are not needed.
+    """
+    if not names:
+        return None, ""
+    try:
+        biggest = max(names.values(), key=lambda p: p.stat().st_size)
+    except (OSError, ValueError):
+        return None, ""
+    try:
+        if biggest.stat().st_size < 8 * 1024 * 1024:
+            return None, ""          # too small to be an engine
+    except OSError:
+        return None, ""
+
+    imports = pe_imports(biggest)
+    has = lambda d: any(d in i for i in imports)
+    if has("d3d12.dll"):
+        return DX12, (f"the engine module beside the executable "
+                      f"({biggest.name}) imports d3d12.dll")
+    if has("d3d11.dll"):
+        return DX11, (f"the engine module beside the executable "
+                      f"({biggest.name}) imports d3d11.dll")
+    if any(i.startswith("vulkan") for i in imports):
+        return VULKAN, (f"the engine module beside the executable "
+                        f"({biggest.name}) imports vulkan-1.dll")
     return None, ""
 
 
@@ -469,12 +550,20 @@ def detect_api(exe: Path, folder: Path | None = None) -> ApiInfo:
             return info
 
     has_imp = lambda d: any(d in i for i in info.imports)
+    # Exact match, for the tiers where the CLAIM is "links against Microsoft's
+    # own runtime". A game module named after the API satisfies a substring
+    # test without being the API: measured on Far Cry 3 2026-09-02,
+    # farcry3_d3d11.exe imports fc3_d3d11.dll (Ubisoft's own renderer) and
+    # `"d3d11.dll" in "fc3_d3d11.dll"` is True, so the tool reported "imports
+    # d3d11.dll statically" at HIGH confidence about a DLL Microsoft never
+    # shipped. Same trap for d3d12.dll (e.g. amd_d3d12.dll, nv_d3d12.dll).
+    imp_exact = lambda d: d in info.imports
 
     # Tier 2: static imports. A statically linked renderer is definitive.
-    if has_imp("d3d12.dll"):
+    if imp_exact("d3d12.dll"):
         info.api, info.reason, info.confidence = DX12, "imports d3d12.dll statically", "high"
         return info
-    if has_imp("d3d11.dll"):
+    if imp_exact("d3d11.dll"):
         info.api, info.reason, info.confidence = DX11, "imports d3d11.dll statically", "high"
         return info
 
@@ -611,7 +700,12 @@ def _score(exe: Path, folder: Path) -> float:
         s -= 900
     fn = re.sub(r"[^a-z0-9]", "", folder.name.lower())
     sn = re.sub(r"[^a-z0-9]", "", stem)
-    if fn and sn and (sn in fn or fn in sn):
+    # The folder-name bonus must mean something. A very short stem is a
+    # substring of almost any title by accident: measured on Far Cry (2004),
+    # "rc" (the CryEngine resource compiler) matched "farcry" and collected
+    # the full bonus, outranking the game itself. Require the shorter side of
+    # the comparison to be a substantial name, not two characters.
+    if fn and sn and (sn in fn or fn in sn) and min(len(fn), len(sn)) >= 4:
         s += 350
     if exe.parent == folder:
         s += 120
@@ -651,6 +745,47 @@ def _score(exe: Path, folder: Path) -> float:
     return s
 
 
+def _api_selfevidence(exe: Path) -> int:
+    """Tie-breaker: does this executable name its own renderer?
+
+    Some publishers ship one thin shell per backend, identical in size and
+    location, and only the import table tells them apart. Measured on Far Cry 3
+    (2012), both 0.2 MB in bin/ and scored identically at 535.2:
+
+        farcry3.exe          no API strings at all      -> Unknown [low]
+        farcry3_d3d11.exe    imports d3d11.dll          -> DX11 [high]
+
+    Directory order decided the winner, and it picked the D3D9 shell, whose own
+    API then had to be guessed from a neighbouring DLL at medium confidence.
+    Ranking modern-API self-evidence above silence keeps the decision on the
+    binary rather than on the filesystem, and never overrides _score() - it
+    only breaks exact ties.
+
+    Matches are EXACT: a shell that imports the publisher's own fc3_d3d11.dll
+    is not importing Microsoft's d3d11.dll, and must not be credited as if it
+    were. What such a shell does prove is which RENDERER MODULE it pulls in,
+    so that is scored separately and lower.
+    """
+    try:
+        imports = pe_imports(exe)
+    except Exception:      # noqa: BLE001 - ranking must never raise
+        return 0
+    if "d3d12.dll" in imports:
+        return 6
+    if "d3d11.dll" in imports:
+        return 5
+    if any(i.startswith("vulkan") for i in imports):
+        return 4
+    # The publisher's own renderer module, named after the API it implements.
+    # Weaker evidence than a Microsoft import, stronger than nothing at all:
+    # it is how Far Cry 3's two identical shells are told apart.
+    if any("d3d12" in i or "dx12" in i for i in imports):
+        return 3
+    if any("d3d11" in i or "dx11" in i for i in imports):
+        return 2
+    return 0
+
+
 def find_game_exes(folder: Path) -> list[Path]:
     """Candidate game executables, most likely first."""
     folder = Path(folder)
@@ -659,7 +794,8 @@ def find_game_exes(folder: Path) -> list[Path]:
     cands = _walk_exes(folder)
     if not cands:
         return []
-    scored = sorted(cands, key=lambda p: _score(p, folder), reverse=True)
+    scored = sorted(cands, key=lambda p: (_score(p, folder), _api_selfevidence(p)),
+                    reverse=True)
     good = [p for p in scored if _score(p, folder) > -500]
     return good or scored
 

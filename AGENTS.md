@@ -316,3 +316,34 @@ instead.
 
 There is no telemetry and no account. Administrator rights are never required
 or requested.
+
+<!-- graphify:begin -->
+## graphify
+
+This project has a code knowledge graph at `graphify-out/` (2134 nodes, 3246 edges).
+
+**Use it first.** The moment a task touches an existing symbol, file, or module
+here, the FIRST tool call is a graph read, as orientation rather than after it.
+
+| Situation | Call |
+|---|---|
+| "What does this project do", first contact | `god_nodes` then `query_graph` |
+| Architecture, data flow, "how does X work" | `query_graph` |
+| About to edit a shared symbol | `get_neighbors` on it, to see every caller |
+| Tracing a bug across modules | `shortest_path` (add `undirected: true` if no path) |
+| "What touches this function" | `get_node` + `get_neighbors` |
+
+These are native MCP tools from the `graphify` server. Pass
+`project_path: "D:/Hermes/DLSS5Kit"` so they answer from THIS project's graph. The CLI
+equivalents (`graphify query` / `path` / `explain`) work too and log the same way.
+
+Opening files with read_file / search_files / grep to understand this code,
+without a graph read first, is a violation of the standing rule, even when the
+file read would also work.
+
+Not in the graph: status, phases, plans, decisions. Those live in the `.md` files
+and must be read directly. The graph is code-only by decision.
+
+After finishing code changes here, run `graphify update .` (AST only, seconds, no
+API cost). A stale graph that answers confidently is worse than no graph.
+<!-- graphify:end -->

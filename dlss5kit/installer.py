@@ -139,6 +139,31 @@ class Report:
 
 # --------------------------------------------------------------- helpers
 
+def install_root(folder: Path) -> Path:
+    """The game's INSTALL ROOT, given any folder inside it.
+
+    Anti-cheat, EULAs and redistributables live at the top of the install,
+    while the executable usually sits in bin/ or Binaries/Win64/. The CLI
+    hands install() the executable's own folder, so a root-level marker is
+    invisible from there. Measured on Watch Dogs 2 2026-09-02:
+
+        Watch Dogs 2/EasyAntiCheat/          <- the marker
+        Watch Dogs 2/bin/WatchDogs2.exe      <- what install() was given
+
+    Walk up through known executable subfolder names only, so a game whose
+    install root is genuinely called "bin" cannot escape into its parent.
+    """
+    folder = Path(folder)
+    subdirs = {"bin", "bin64", "bin32", "binaries", "win64", "win32",
+               "x64", "x86", "retail"}
+    cur = folder
+    for _ in range(3):
+        if cur.name.lower() not in subdirs or cur.parent == cur:
+            break
+        cur = cur.parent
+    return cur
+
+
 def detect_anticheat(folder: Path) -> tuple[str, list[str]]:
     """(summary, evidence). Looks two levels down, which is where it lives."""
     found: dict[str, list[str]] = {}
@@ -458,7 +483,9 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
             f"overwriting it would break whatever it is doing.")
 
     # --- anti-cheat: state it, do not refuse ------------------------------
-    ac_name, ac_evidence = detect_anticheat(root)
+    # Search from the INSTALL ROOT, not the executable's folder: the marker
+    # lives at the top of the install and root is usually bin/'s parent.
+    ac_name, ac_evidence = detect_anticheat(install_root(root))
     if ac_name:
         rep.warnings.append(
             f"{ac_name} detected ({', '.join(ac_evidence[:4])}). ReShade "

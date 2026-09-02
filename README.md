@@ -327,8 +327,10 @@ a reasonable choice and the tool works identically.
 
 - **Do not use this in online games.** ReShade with add-ons is detected by
   anti-cheat. BattlEye, EAC, Vanguard and GameGuard are detected in the game
-  folder and reported before the install, but the install is not blocked: it
-  is your machine.
+  folder and reported by `--check` as well as before the install, but the
+  install is not blocked: it is your machine. The search starts from the
+  install root, so a marker at the top of the folder is still found when the
+  executable lives in `bin\` or `Binaries\Win64\`.
 - **Set your resolution before turning neural rendering on.** The DLSS feature
   is created for one backbuffer size; changing resolution or display mode
   while it runs forces a rebuild that can black-screen or freeze the game.

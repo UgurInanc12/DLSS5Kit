@@ -1235,6 +1235,214 @@ def test_32bit_install_layout():
         check("status finds dlss in host64", st["present"]["nvngx_dlss"])
 
 
+def test_maglumkaynak_older_games():
+    """Five defects found by running v1.8.0 against C:\\Games\\MaglumKaynak.
+
+    Far Cry (2004), Far Cry 3 (2012) and Watch Dogs 2 (2016), 2026-09-02.
+    Each case is reproduced from the real layout that exposed it, so the
+    fixes cannot silently regress.
+    """
+    print("\n[older games: exe ranking, neighbour DLLs, anti-cheat]")
+
+    # 1. Far Cry (2004). Bin32/ holds the game, a configurator, and the whole
+    #    CryEngine toolchain. Measured before the fix:
+    #      FarCryConfigurator.exe 335.5   <- picked, and DX9 was read off it
+    #      rc.exe                 335.1   <- "rc" is a substring of "farcry"
+    #      FarCry.exe             335.0   <- the actual game, third
+    with tempfile.TemporaryDirectory() as td:
+        game = Path(td) / "Far Cry"
+        b32 = game / "Bin32"
+        for name, size in (("FarCry.exe", 30_000),
+                           ("FarCryConfigurator.exe", 420_000),
+                           ("rc.exe", 110_000),
+                           ("cgc.exe", 800_000),
+                           ("Editor.exe", 4_220_000),
+                           ("FarCry_WinSV.exe", 30_000)):
+            make_pe(b32 / name, peinfo.PE_X86, b"\0" * size)
+        exes = peinfo.find_game_exes(game)
+        top = exes[0].name if exes else "none"
+        check("Far Cry picks the game, not the configurator",
+              top == "FarCry.exe", top)
+        offered = {p.stem.lower() for p in exes}
+        check("the configurator is not even a candidate",
+              "farcryconfigurator" not in offered, str(sorted(offered)))
+        check("CryEngine tools (rc, cgc, editor) are not candidates",
+              not ({"rc", "cgc", "editor"} & offered), str(sorted(offered)))
+        check("the dedicated server does not win",
+              top != "FarCry_WinSV.exe", top)
+        # Score the real game ABOVE every impostor, so the ordering does not
+        # depend on which one the filesystem happened to yield first. Without
+        # this the assertions above can pass on tie-break luck alone.
+        gs = peinfo._score(b32 / "FarCry.exe", game)
+        for impostor in ("FarCryConfigurator.exe", "rc.exe", "cgc.exe",
+                         "Editor.exe"):
+            check(f"FarCry.exe outscores {impostor}",
+                  gs > peinfo._score(b32 / impostor, game),
+                  f"{gs:.1f} vs {peinfo._score(b32 / impostor, game):.1f}")
+
+    # 2. A short stem must not collect the folder-name bonus by accident.
+    #    Measure the bonus in ISOLATION: "rc" is also an engine-tool name now,
+    #    and that -1200 penalty would mask whether the bonus still fires. Use
+    #    a neutral two-letter stem that is a substring of the folder name but
+    #    carries no other rule, so only the bonus can move the number.
+    with tempfile.TemporaryDirectory() as td:
+        g = Path(td) / "Far Cry"
+        g.mkdir(parents=True)
+        for n in ("ar.exe", "FarCry.exe", "Zqx.exe"):
+            make_pe(g / n, peinfo.PE_X86, b"\0" * 50_000)
+        s_short = peinfo._score(g / "ar.exe", g)      # "ar" is inside "farcry"
+        s_game = peinfo._score(g / "FarCry.exe", g)
+        s_none = peinfo._score(g / "Zqx.exe", g)      # unrelated name
+        check("a 2-letter stem gets no folder-name bonus",
+              abs(s_short - s_none) < 1,
+              f"short={s_short:.1f} unrelated={s_none:.1f}")
+        check("a real name match still gets the full bonus",
+              s_game - s_none > 300, f"game={s_game:.1f} unrelated={s_none:.1f}")
+        # And the tool name is penalised on top, independently of the bonus.
+        check("an engine tool name is penalised",
+              peinfo._score(g / "FarCry.exe", g)
+              > peinfo._score(Path(str(g / "rc.exe")), g))
+        make_pe(g / "rc.exe", peinfo.PE_X86, b"\0" * 50_000)
+        check("and rc.exe scores below an unrelated executable",
+              peinfo._score(g / "rc.exe", g) < s_none,
+              f"rc={peinfo._score(g / 'rc.exe', g):.1f} unrelated={s_none:.1f}")
+
+    # 3. Far Cry 3 ships two identical 0.2 MB shells in bin/, one per
+    #    renderer, scored the same (535.2), so directory order decided it and
+    #    the D3D9 shell won. The tie must be broken on what each binary
+    #    actually pulls in.
+    real_imports = peinfo.pe_imports
+    try:
+        table = {"farcry3.exe": ["fc3.dll", "msvcr100.dll", "kernel32.dll"],
+                 "farcry3_d3d11.exe": ["fc3_d3d11.dll", "msvcr100.dll",
+                                       "kernel32.dll"]}
+        peinfo.pe_imports = lambda p: table.get(Path(p).name.lower(), [])
+        with tempfile.TemporaryDirectory() as td:
+            game = Path(td) / "Far Cry 3"
+            for name in ("farcry3.exe", "farcry3_d3d11.exe"):
+                make_pe(game / "bin" / name, peinfo.PE_X86, b"\0" * 200_720)
+            exes = peinfo.find_game_exes(game)
+            top = exes[0].name if exes else "none"
+            check("Far Cry 3 prefers the D3D11 shell over the D3D9 one",
+                  top == "farcry3_d3d11.exe", top)
+
+        # 4. ...but a publisher's own module named after the API is NOT the
+        #    Microsoft runtime. `"d3d11.dll" in "fc3_d3d11.dll"` is True, and
+        #    a substring test reported "imports d3d11.dll statically" at HIGH
+        #    confidence about a DLL Microsoft never shipped.
+        with tempfile.TemporaryDirectory() as td:
+            exe = make_pe(Path(td) / "farcry3_d3d11.exe", peinfo.PE_X86)
+            peinfo.pe_imports = lambda p: ["fc3_d3d11.dll", "kernel32.dll"]
+            info = peinfo.detect_api(exe)
+            check("a publisher module is not credited as a static d3d11 import",
+                  "statically" not in info.reason, info.reason)
+            check("and such a claim is not made at high confidence",
+                  info.confidence != "high", info.confidence)
+            peinfo.pe_imports = lambda p: ["d3d11.dll", "kernel32.dll"]
+            info = peinfo.detect_api(exe)
+            check("a real d3d11.dll import is still high confidence",
+                  info.api == peinfo.DX11 and info.confidence == "high",
+                  f"{info.api} {info.confidence}")
+    finally:
+        peinfo.pe_imports = real_imports
+
+    # 5. Watch Dogs 2: bin/ holds NVIDIA GameWorks helpers whose file names
+    #    carry an API, beside the 138.9 MB engine, whose own name carries
+    #    none. Returning on the first name match credited a shadow-mapping
+    #    helper as the renderer.
+    #
+    #    The fixture must mirror that shape exactly: engine name WITHOUT an
+    #    API in it, helpers WITH one. An earlier version of this test used a
+    #    DX12 engine named Engine_DX12.dll, which the DX12 branch answered
+    #    before the DX11 helpers were ever reached - so deleting the helper
+    #    filter changed nothing and the test passed on a mutant. Measured, and
+    #    it proved the test wrong rather than the code right.
+    with tempfile.TemporaryDirectory() as td:
+        b = Path(td) / "bin"
+        b.mkdir(parents=True)
+        (b / "GFSDK_ShadowLib_DX11.win64.dll").write_bytes(b"\0" * 2_500_000)
+        (b / "GFSDK_SSAO_D3D11.win64.dll").write_bytes(b"\0" * 1_200_000)
+        engine = b / "Disrupt_64.dll"
+        engine.write_bytes(b"\0" * 40_000_000)
+        real_imports = peinfo.pe_imports
+        try:
+            peinfo.pe_imports = lambda p: (
+                ["d3d11.dll", "d3d9.dll", "dxgi.dll"]
+                if Path(p).name.lower() == "disrupt_64.dll" else [])
+            api, why = peinfo.api_from_neighbour_dlls(b)
+        finally:
+            peinfo.pe_imports = real_imports
+        check("a GameWorks helper does not decide the renderer",
+              "gfsdk" not in why.lower(), why)
+        check("the engine module's own imports decide instead",
+              api == peinfo.DX11 and "disrupt_64.dll" in why.lower(),
+              f"{api}: {why}")
+
+    # A module whose name really does announce the API still wins, and the
+    # largest such module is preferred over a smaller one.
+    with tempfile.TemporaryDirectory() as td:
+        b = Path(td) / "bin"
+        b.mkdir(parents=True)
+        (b / "GFSDK_ShadowLib_DX11.win64.dll").write_bytes(b"\0" * 2_500_000)
+        (b / "Engine_DX12.dll").write_bytes(b"\0" * 40_000_000)
+        api, why = peinfo.api_from_neighbour_dlls(b)
+        check("a named engine module still decides",
+              api == peinfo.DX12 and "engine_dx12" in why.lower(), why)
+
+    # 6. Anti-cheat lives at the INSTALL ROOT while the exe sits in bin/, so
+    #    install() (which is handed the exe's folder) never saw it, and
+    #    --check reported warnings: [] for a game shipping Easy Anti-Cheat.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "Watch Dogs 2"
+        (root / "EasyAntiCheat").mkdir(parents=True)
+        (root / "bin").mkdir(parents=True)
+        check("install_root climbs out of bin/",
+              installer.install_root(root / "bin") == root,
+              str(installer.install_root(root / "bin")))
+        check("install_root leaves a real root alone",
+              installer.install_root(root) == root)
+        name, _ = installer.detect_anticheat(installer.install_root(root / "bin"))
+        check("anti-cheat is found from the exe's folder",
+              name == "Easy Anti-Cheat", name or "nothing")
+        warn = routes.anticheat_warning(root / "bin")
+        check("and it reaches the inspection as a warning",
+              "Easy Anti-Cheat" in warn and "ban" in warn, warn[:60])
+        plan = routes.choose(root / "bin", peinfo.ApiInfo(), 64)
+        check("choose() carries the anti-cheat warning",
+              any("Anti-Cheat" in w for w in plan.warnings),
+              str(plan.warnings))
+
+    # The INSTALL path must warn too, from the exe's own folder. This is the
+    # case that reverting install_root() has to break: install() is handed
+    # bin/, and the marker is one level up.
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "Watch Dogs 2"
+        binp = root / "bin"
+        binp.mkdir(parents=True)
+        (root / "EasyAntiCheat").mkdir(parents=True)
+        make_pe(binp / "Game.exe", peinfo.PE_X64, extra=b"d3d11.dll\0")
+        local = build_local(base / "local")
+        setup = make_reshade_setup(base / "ReShade_Setup_6.8.0_Addon.exe")
+        api = peinfo.ApiInfo(api=peinfo.DX11, confidence="high")
+        plan = routes.choose(binp, api, 64)
+        opt = installer.Options(route=routes.FEEDER, local_dir=local,
+                                reshade_setup=setup, card=TEST_CARD)
+        rep = installer.install(binp, binp / "Game.exe", api, 64, plan, opt)
+        check("install() warns about anti-cheat found one level up",
+              any("Anti-Cheat" in w for w in rep.warnings),
+              str(rep.warnings)[:80])
+        check("and the install still completes (a caution, not a refusal)",
+              rep.complete is True)
+
+    # A game with no anti-cheat must not gain a warning.
+    with tempfile.TemporaryDirectory() as td:
+        clean = Path(td) / "Clean Game"
+        (clean / "bin").mkdir(parents=True)
+        check("a clean game gets no anti-cheat warning",
+              routes.anticheat_warning(clean / "bin") == "")
+
+
 def main() -> int:
     print("DLSS5Kit offline tests")
     test_ini()
@@ -1249,6 +1457,7 @@ def main() -> int:
     test_runtime_report()
     test_kit_addon_step()
     test_engine_tools_and_rtx_remix()
+    test_maglumkaynak_older_games()
     test_32bit_install_layout()
     test_bridge_private_device_does_not_flip_the_verdict()
     test_generations_and_ptx()
