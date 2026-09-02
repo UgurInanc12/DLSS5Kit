@@ -343,8 +343,13 @@ a reasonable choice and the tool works identically.
   only as 64-bit code. The tool installs both halves. Upstream calls this path
   beta; the helper opens its own window titled "32-bit DLSS 5 Feeder", and
   that is where the DLSS 5 add-on's panel lives.
-- DirectX 9, DirectX 10, 32-bit on any other API, and RTX Remix titles are
-  refused with a reason rather than half-attempted.
+- DirectX 9 games are reached through **dgVoodoo2**, which translates D3D9 to
+  D3D11; the tool installs and configures it automatically, then does an
+  ordinary 32-bit or 64-bit install on top. This is beta, and it needs one
+  check only you can do: launch the game once and confirm the dgVoodoo2
+  watermark appears. No watermark means nothing after it can work.
+- DirectX 10, and RTX Remix titles, are refused with a reason rather than
+  half-attempted.
 
 ## After installing
 

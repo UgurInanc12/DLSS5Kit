@@ -112,6 +112,13 @@ def detect_native_dlss(folder: Path,
     executable wins: the files are somebody's leftovers.
     """
     evidence: list[str] = []
+    # A folder is not always available: --check can be handed an .exe, and
+    # callers that only want the API-to-route decision pass None. Nothing
+    # about "does this game ship DLSS" can be answered without a folder, so
+    # answer no rather than raising - measured 2026-09-02, choose(None, ...)
+    # died with TypeError before this guard.
+    if folder is None:
+        return False, [], ""
     for m in STREAMLINE + OWN_RUNTIME:
         if (folder / m).is_file():
             evidence.append(m)
@@ -193,46 +200,106 @@ def choose(folder: Path, api: peinfo.ApiInfo, bitness: int,
                 "DLSS 5 add-on's own panel lives; press Home there.")
             return p
 
-        p.supported = False
-        p.blocker = ("32-bit games are only supported on D3D11 or D3D12, "
-                     f"through the feeder's 64-bit helper process. This one "
-                     f"reports {api.api}, which has no path: the DLSS 5 "
-                     "add-on, the bridge and the NGX runtimes are all 64-bit "
-                     "and D3D11/D3D12 only.")
-        # RTX Remix is a special case worth naming, because the plain
-        # "32-bit" answer is misleading: the game process is 32-bit but the
-        # process that actually renders is a separate 64-bit one, and the
-        # title already ships DLSS. Users otherwise assume the tool simply
-        # failed to look properly. Measured on Half-Life 2 RTX 2026-09-02.
-        if folder is not None and peinfo.remix_bridge(folder) is not None:
-            p.blocker = (
-                "This is an RTX Remix title. The game executable is 32-bit, "
-                "but rendering happens in a separate 64-bit process "
-                "(bin\\.trex\\NvRemixBridge.exe) whose renderer "
-                "(bin\\.trex\\d3d9.dll, a dxvk-remix build) draws with "
-                "Vulkan and ships its own DLSS runtimes - it references "
-                "NVSDK_NGX_VULKAN and never D3D12.\n\n"
-                "Nothing here can be installed into that: ReShade would have "
-                "to attach to the bridge process rather than the game, the "
-                "DLSS 5 add-on only detours D3D12 NGX calls, and Remix "
-                "already performs its own path-traced rendering with DLSS "
-                "and Ray Reconstruction. Use the game's own DLSS settings "
-                "instead.")
+        # D3D9, OpenGL and Vulkan on 32-bit are NOT refusals: the 32-bit
+        # add-on accepts "Direct3D 11, OpenGL and Vulkan" (verified in
+        # upstream's src/dlss5-feed32.cpp), and D3D9 becomes D3D11 through
+        # dgVoodoo2. D3D10 falls through too, so it gets the DirectX 10
+        # explanation below (which names the practical way out) rather than a
+        # generic "32-bit" one. Only genuinely unreachable APIs stop here.
+        if api.api in (peinfo.DX9, peinfo.DX10, peinfo.OPENGL, peinfo.VULKAN):
+            pass
+        else:
+            p.supported = False
+            p.blocker = ("32-bit games are supported on D3D11, D3D12, OpenGL "
+                         "and Vulkan through the feeder's 64-bit helper "
+                         f"process, and on D3D9 through dgVoodoo2. This one "
+                         f"reports {api.api}, which none of those paths "
+                         "reach.")
+            # RTX Remix is a special case worth naming, because the plain
+            # "32-bit" answer is misleading: the game process is 32-bit but the
+            # process that actually renders is a separate 64-bit one, and the
+            # title already ships DLSS. Users otherwise assume the tool simply
+            # failed to look properly. Measured on Half-Life 2 RTX 2026-09-02.
+            if folder is not None and peinfo.remix_bridge(folder) is not None:
+                p.blocker = (
+                    "This is an RTX Remix title. The game executable is 32-bit, "
+                    "but rendering happens in a separate 64-bit process "
+                    "(bin\\.trex\\NvRemixBridge.exe) whose renderer "
+                    "(bin\\.trex\\d3d9.dll, a dxvk-remix build) draws with "
+                    "Vulkan and ships its own DLSS runtimes - it references "
+                    "NVSDK_NGX_VULKAN and never D3D12.\n\n"
+                    "Nothing here can be installed into that: ReShade would have "
+                    "to attach to the bridge process rather than the game, the "
+                    "DLSS 5 add-on only detours D3D12 NGX calls, and Remix "
+                    "already performs its own path-traced rendering with DLSS "
+                    "and Ray Reconstruction. Use the game's own DLSS settings "
+                    "instead.")
+            return p
+
+    if api.api == peinfo.DX9:
+        # NOT a refusal. Upstream reaches D3D9 through dgVoodoo2, which
+        # translates it to D3D11, after which the ordinary feeder install
+        # applies. Their Status table verifies it on Fable Anniversary
+        # (32-bit D3D9, 1440p 60 fps), and the reason it has to work this way
+        # is visible in their source: the 32-bit add-on accepts
+        # "Direct3D 11, OpenGL and Vulkan" only (src/dlss5-feed32.cpp), so
+        # the game must become a D3D11 one before anything can hook it.
+        #
+        # This tool used to answer "DX9 is not supported. Nothing hooks it,
+        # and the translation layers needed to reach it are out of scope."
+        # That was a claim about the world, and it was wrong.
+        p.route = FEEDER
+        p.supported = True
+        p.options = [FEEDER]
+        p.reason = (
+            "DirectX 9 is reached through dgVoodoo2, which translates D3D9 "
+            "into D3D11; from there this is an ordinary feeder install. "
+            "dgVoodoo2 is installed beside the game executable and "
+            "configured automatically (DisableAndPassThru=false, VRAM=1GB, "
+            "OutputAPI=d3d11_fl11_0), and ReShade goes in as dxgi.dll "
+            "because dgVoodoo2 owns the d3d9.dll name.")
+        p.warnings.append(
+            "DirectX 9 support is beta and needs one check only you can do: "
+            "launch the game once and confirm the dgVoodoo2 watermark appears "
+            "in the corner. No watermark means the translation layer did not "
+            "engage and nothing after it can work. Run --remove-watermark "
+            "once you have seen it.")
+        if bitness == 64:
+            p.warnings.append(
+                "This is a 64-bit D3D9 game. ShortFuse's renodx-dlss add-on "
+                "now handles 64-bit D3D9 presentation natively, in-process, "
+                "and upstream recommends it over the feeder for exactly this "
+                "case. It is distributed through the RenoDX Discord #DLSS5 "
+                "channel rather than a public release, so this tool cannot "
+                "fetch it. The feeder path installed here still works, and "
+                "gives real motion vectors that the native add-on does not "
+                "have on D3D9.")
         return p
 
-    if api.api in (peinfo.DX9, peinfo.DX10):
+    if api.api == peinfo.DX10:
         p.supported = False
-        p.blocker = (f"{api.api} is not supported. Nothing hooks it, and the "
-                     f"translation layers needed to reach it are out of scope.")
+        p.blocker = (
+            "DirectX 10 is not supported. dgVoodoo2 covers D3D9 and older, "
+            "not D3D10, and nothing in the chain hooks a D3D10 device. "
+            "Games from this era usually ship a DX9 or DX11 renderer as "
+            "well: if this one does, select that executable or switch the "
+            "game to it in its own settings.")
         return p
 
     if api.api == peinfo.OPENGL:
         p.route = FEEDER
         p.options = [FEEDER]
-        p.reason = ("OpenGL: the add-on and the bridge both hook NGX's "
-                    "D3D11/D3D12/Vulkan entry points and reach none of them "
-                    "here. Only the feeder's synthetic contract can work.")
-        p.warnings.append("OpenGL is a long shot - expect it not to work.")
+        p.reason = (
+            "OpenGL: the add-on and the bridge both hook NGX's "
+            "D3D11/D3D12/Vulkan entry points and reach none of them here. "
+            "The feeder builds the contract itself and shares frames with a "
+            "private D3D12 device through GL/D3D12 interop. ReShade installs "
+            "as opengl32.dll beside the executable rather than dxgi.dll.")
+        p.warnings.append(
+            "OpenGL is supported but less travelled than D3D11/D3D12. "
+            "Upstream verifies it on Worms Ultimate Mayhem (32-bit OpenGL, "
+            "4K, 0.13 ms/frame). If the frame never changes, check "
+            "dlss5-feed.log for the interop entry points.")
         return p
 
     if api.api == peinfo.VULKAN:

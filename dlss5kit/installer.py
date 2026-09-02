@@ -51,6 +51,23 @@ PROXY_DLL = "dxgi.dll"
 OPENGL_PROXY = "opengl32.dll"
 
 RENODX = "renodx-dlss5.addon64"
+
+# The feeder route detours this add-on, and upstream pins it:
+#
+#   "renodx-dlss5.addon64 ... has started building part of the synthetic DLSS
+#    contract itself in builds past v4.55. Running a newer build alongside
+#    DLSS5-Feeder conflicts. Use v4.55."
+#       - DLSS5-Feeder README, read 2026-09-02
+#
+# Upstream adds that a build from current main handles v4.6 with guards, but
+# "no game row has verified a v4.6 run yet - with the released feeder builds,
+# stay on v4.55". We install released feeder builds, so the pin applies.
+#
+# It applies ONLY to the feeder route: native and bridge do not detour the
+# add-on and want the newest build. Measured 2026-09-02: this tool had put
+# 4.70 into a feeder install (Batman: Arkham Knight).
+FEEDER_RENODX_MAX = "4.55"
+
 DLSSNR = "nvngx_dlssnr.dll"
 DLSS = "nvngx_dlss.dll"
 BRIDGE_ADDON = "dlss5-bridge.addon64"
@@ -360,15 +377,28 @@ def _copy(src: Path, dst: Path, rep: Report, root: Path) -> None:
         rep.written.append(rel)
 
 
-def extract_member(zip_path: Path, ends_with: str) -> bytes:
-    """Read the first member whose name ends with `ends_with`.
+def extract_member(zip_path: Path, ends_with: str, exact: bool = False) -> bytes:
+    """Read a member of a zip: the first whose name ends with `ends_with`.
 
     The ReShade setup exe is a PE with a zip appended; zipfile reads it
     directly from the end-of-central-directory record, so the interactive
     wizard is entirely unnecessary.
+
+    `exact=True` matches the full path instead. Suffix matching is convenient
+    but picks whichever copy comes first, and archives do ship several:
+    measured on dgVoodoo2 2.87.3, asking for "dgVoodooCpl.exe" returned
+    `Cpl/arm64/dgVoodooCpl.exe` (an ARM64 binary that cannot run on x64)
+    rather than the x86/x64 build in the archive root.
     """
     with zipfile.ZipFile(zip_path) as z:
-        for name in z.namelist():
+        names = z.namelist()
+        if exact:
+            want = ends_with.lower().replace("\\", "/")
+            for name in names:
+                if name.lower().replace("\\", "/") == want:
+                    return z.read(name)
+            raise InstallError(f"{zip_path.name} does not contain {ends_with}")
+        for name in names:
             if name.lower().endswith(ends_with.lower()):
                 return z.read(name)
     raise InstallError(f"{zip_path.name} does not contain {ends_with}")
@@ -435,8 +465,11 @@ def find_reshade_setup() -> Path | None:
 
 # --------------------------------------------------------------- planning
 
-def plan_steps(route: str, provider: int) -> list[str]:
-    steps = ["ReShade"]
+def plan_steps(route: str, provider: int, api: str = "") -> list[str]:
+    steps = []
+    if api == peinfo.DX9:
+        steps.append("dgVoodoo2 (D3D9 to D3D11)")
+    steps.append("ReShade")
     if route == FEEDER:
         steps += ["ReShade shader headers", "DLSS5-Feeder"]
         if provider in (3, 4):
@@ -450,6 +483,63 @@ def plan_steps(route: str, provider: int) -> list[str]:
     elif route == BRIDGE:
         steps.append("dlss5-bridge.cfg")
     return steps
+
+
+# dgVoodoo2's shipped dgVoodoo.conf disables the whole thing by default, and
+# its VRAM default crashes old engines on a modern card. These four are the
+# settings upstream calls out, each with the failure it prevents.
+DGVOODOO_SETTINGS = {
+    # Ships as true, which makes dgVoodoo pass everything through to the real
+    # D3D9 - "the #1 reason dgVoodoo doesn't seem to do anything".
+    "DisableAndPassThru": "false",
+    # The 256 MB default causes "ran out of video memory" crashes regardless
+    # of the real GPU. NOT 2GB: some old engines mishandle it.
+    "VRAM": "1GB",
+    "VideoCard": "internal3D",
+    # Temporary, and the only proof a user can see that the layer engaged.
+    "dgVoodooWatermark": "true",
+}
+
+
+def write_dgvoodoo_conf(conf: Path, watermark: bool = True) -> None:
+    """Apply the required settings to a dgVoodoo.conf, preserving the rest.
+
+    The shipped file is 21 KB of commented defaults across several sections;
+    rewriting it wholesale would drop options a particular game needs. Each
+    key is edited in place instead, and only within the section it belongs to
+    (`VideoCard` exists under more than one heading).
+    """
+    text = conf.read_text(encoding="utf8", errors="replace")
+    wanted = dict(DGVOODOO_SETTINGS)
+    wanted["dgVoodooWatermark"] = "true" if watermark else "false"
+
+    out: list[str] = []
+    section = ""
+    seen: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip().lower()
+        elif "=" in stripped and not stripped.startswith(";"):
+            key = stripped.split("=", 1)[0].strip()
+            target = "directx" if key in wanted else ""
+            if key == "OutputAPI":
+                target = "general"
+            if target and section == target:
+                value = ("d3d11_fl11_0" if key == "OutputAPI"
+                         else wanted[key])
+                out.append(f"{key} = {value}")
+                seen.add(key)
+                continue
+        out.append(line)
+
+    missing = (set(wanted) | {"OutputAPI"}) - seen
+    if missing:
+        raise InstallError(
+            "dgVoodoo.conf does not contain the expected settings "
+            f"({', '.join(sorted(missing))}). The archive layout has changed; "
+            "configure dgVoodoo2 by hand with dgVoodooCpl.exe.")
+    conf.write_text("\n".join(out) + "\n", encoding="utf8")
 
 
 # ---------------------------------------------------------------- install
@@ -520,7 +610,7 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
         log(f"    using local files from {opt.local_dir}: "
             f"{', '.join(sorted(local))}")
 
-    steps = plan_steps(route, opt.provider)
+    steps = plan_steps(route, opt.provider, api.api)
     n = len(steps)
     idx = 0
 
@@ -534,6 +624,34 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
         return sources.download(url, fname, progress=lambda p, t: prog(p, t))
 
     try:
+        # --- 0) dgVoodoo2, for D3D9 games only -----------------------------
+        # D3D9 has to become D3D11 before anything downstream can hook it:
+        # the 32-bit feeder add-on accepts "Direct3D 11, OpenGL and Vulkan"
+        # only, and the 64-bit one D3D11/D3D12/Vulkan/OpenGL. Neither takes
+        # a D3D9 device. dgVoodoo2 sits under everything else and translates.
+        if api.api == peinfo.DX9:
+            begin("dgVoodoo2 (D3D9 to D3D11)")
+            dgv_ver, dgv_url = sources.resolve_dgvoodoo()
+            dgv_zip = sources.download(
+                dgv_url, f"dgVoodoo2-{dgv_ver}.zip",
+                progress=lambda p, t: prog(p, t),
+                headers=sources.BROWSER_UA)
+            # x86 for a 32-bit game, x64 for a 64-bit one: the D3D9.dll that
+            # replaces the system one must match the game's own bitness.
+            arch = "x86" if bitness != 64 else "x64"
+            _place(extract_member(dgv_zip, f"MS/{arch}/D3D9.dll", exact=True),
+                   root / "D3D9.dll", rep, root)
+            _place(extract_member(dgv_zip, "dgVoodooCpl.exe", exact=True),
+                   root / "dgVoodooCpl.exe", rep, root)
+            _place(extract_member(dgv_zip, "dgVoodoo.conf", exact=True),
+                   root / "dgVoodoo.conf", rep, root)
+            write_dgvoodoo_conf(root / "dgVoodoo.conf", watermark=True)
+            rep.components["dgvoodoo"] = dgv_ver
+            log(f"      dgVoodoo2 {dgv_ver} ({arch}) -> D3D9.dll, "
+                f"configured for d3d11_fl11_0")
+            log("      watermark is ON: confirm it appears in game, then "
+                "run --remove-watermark")
+
         # --- 1) ReShade ---------------------------------------------------
         begin("ReShade")
         setup = opt.reshade_setup or find_reshade_setup()
@@ -584,12 +702,21 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
                 rep.components["feeder"] = "local"
             else:
                 tag, assets = sources.resolve_feeder()
-                for name, dest in ((game_addon, root / game_addon),
-                                   (FEEDER_FX, root / SHADERS / FEEDER_FX)):
-                    if name not in assets:
-                        raise InstallError(
-                            f"The DLSS5-Feeder release {tag} has no {name}.")
-                    _copy(dl(assets[name], f"{tag}-{name}"), dest, rep, root)
+                bundle = sources.feeder_bundle(assets)
+                if bundle is not None:
+                    # v0.8.0 and later ship one zip holding every piece.
+                    z = dl(assets[bundle], f"{tag}-{bundle}")
+                    _place(extract_member(z, game_addon), root / game_addon,
+                           rep, root)
+                    _place(extract_member(z, FEEDER_FX),
+                           root / SHADERS / FEEDER_FX, rep, root)
+                else:
+                    for name, dest in ((game_addon, root / game_addon),
+                                       (FEEDER_FX, root / SHADERS / FEEDER_FX)):
+                        if name not in assets:
+                            raise InstallError(
+                                f"The DLSS5-Feeder release {tag} has no {name}.")
+                        _copy(dl(assets[name], f"{tag}-{name}"), dest, rep, root)
                 log(f"      DLSS5-Feeder {tag} ({game_addon})")
                 rep.components["feeder"] = tag
 
@@ -617,15 +744,22 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
 
             begin("host64 helper")
             tag, assets = sources.resolve_feeder()
-            if FEEDER_HOST64 not in assets:
-                raise InstallError(
-                    f"The DLSS5-Feeder release {tag} has no {FEEDER_HOST64}, "
-                    f"which the 32-bit path cannot work without.")
             if FEEDER_HOST64 in local:
                 _copy(local[FEEDER_HOST64], dlss_root / FEEDER_HOST64, rep, root)
             else:
-                _copy(dl(assets[FEEDER_HOST64], f"{tag}-{FEEDER_HOST64}"),
-                      dlss_root / FEEDER_HOST64, rep, root)
+                bundle = sources.feeder_bundle(assets)
+                if bundle is not None:
+                    z = dl(assets[bundle], f"{tag}-{bundle}")
+                    _place(extract_member(z, FEEDER_HOST64),
+                           dlss_root / FEEDER_HOST64, rep, root)
+                elif FEEDER_HOST64 in assets:
+                    _copy(dl(assets[FEEDER_HOST64], f"{tag}-{FEEDER_HOST64}"),
+                          dlss_root / FEEDER_HOST64, rep, root)
+                else:
+                    raise InstallError(
+                        f"The DLSS5-Feeder release {tag} has no "
+                        f"{FEEDER_HOST64}, which the 32-bit path cannot work "
+                        f"without.")
             # The helper is a separate 64-bit ReShade process of its own.
             _place(extract_member(setup, "ReShade64.dll"),
                    dlss_root / PROXY_DLL, rep, root)
@@ -650,11 +784,18 @@ def install(game_dir: Path, exe: Path, api: peinfo.ApiInfo, bitness: int,
             log(f"      {RENODX} (local file)")
             rep.components["renodx"] = "local"
         else:
-            e = sources.pick(cat()["renodx"], opt.renodx_version)
+            want = opt.renodx_version
+            entries = cat()["renodx"]
+            if not want and route == FEEDER:
+                want = sources.pick_capped(entries, FEEDER_RENODX_MAX)
+            e = sources.pick(entries, want)
             f = dl(e["url"], f"renodx-{e['label']}.zip")
             _place(extract_member(f, ".addon64"), dlss_root / RENODX, rep, root)
             log(f"      renodx-dlss5 {e['label']}")
             rep.components["renodx"] = e["label"]
+            if route == FEEDER and not opt.renodx_version:
+                log(f"      (pinned to <= {FEEDER_RENODX_MAX}: newer builds "
+                    f"conflict with the feeder)")
 
         begin("DLSS5Kit control panel")
         kit = bundled_kit_addon()
@@ -935,7 +1076,11 @@ def status(game_dir: Path) -> dict:
         "nvngx_dlss": ((root / DLSS).is_file()
                        or (root / HOST64_DIR / DLSS).is_file()),
         "bridge": (root / BRIDGE_ADDON).is_file(),
-        "feeder": (root / FEEDER_ADDON).is_file(),
+        # A 32-bit install puts the .addon32 beside the game instead, so
+        # checking only the 64-bit name reports "feeder: false" on a complete
+        # 32-bit feeder install (measured on Far Cry 2026-09-02).
+        "feeder": ((root / FEEDER_ADDON).is_file()
+                   or (root / FEEDER_ADDON32).is_file()),
     }
     return {
         "installed": man is not None,

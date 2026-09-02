@@ -51,6 +51,27 @@ RHI_API = "https://api.github.com/repos/RankFTW/rhi-repo/releases?per_page=100"
 LUMENITE_ZIP = ("https://codeload.github.com/umar-afzaal/LumeniteFX/"
                 "zip/refs/heads/mainline")
 
+# dgVoodoo2 translates D3D9 (and older) to D3D11, which is what makes a
+# DirectX 9 game reachable at all: the feeder's 32-bit add-on accepts
+# "Direct3D 11, OpenGL and Vulkan" only (src/dlss5-feed32.cpp), so a D3D9 game
+# has to become a D3D11 one first. Upstream verifies this path on Fable
+# Anniversary (32-bit D3D9, 1440p 60 fps).
+#
+# There is no API and no GitHub release: it is one page on the author's own
+# site, so the download page is parsed for the newest zip rather than guessed.
+# Measured 2026-09-02: dgVoodoo2_87_3.zip, 9,082,391 bytes, carrying
+# MS/x86/D3D9.dll, dgVoodoo.conf and dgVoodooCpl.exe.
+DGVOODOO_PAGE = "http://dege.freeweb.hu/dgVoodoo2/dgVoodoo2/"
+DGVOODOO_BASE = "http://dege.freeweb.hu/dgVoodoo2/"
+DGVOODOO_RE = re.compile(r'href="([^"]*?dgVoodoo2_[\d_]+\.zip)"', re.I)
+
+# freeweb.hu answers 404 to anything that does not look like a browser.
+# Measured 2026-09-02: our own UA, "curl/8.0" and an empty UA all got 404 on
+# the page that returns 200 for a normal browser string. This is the host's
+# hotlink protection, not a missing file, so the request carries a browser UA
+# instead of failing with a misleading "not found".
+BROWSER_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
 ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "dlss5kit"
 CACHE = ROOT / "cache"
 API_CACHE = ROOT / "api-cache"
@@ -71,8 +92,8 @@ class DownloadError(RuntimeError):
 
 # ------------------------------------------------------------------ HTTP
 
-def _get(url: str, timeout: int = 60) -> bytes:
-    req = urllib.request.Request(url, headers=UA)
+def _get(url: str, timeout: int = 60, headers: dict | None = None) -> bytes:
+    req = urllib.request.Request(url, headers=headers or UA)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read()
@@ -131,7 +152,7 @@ def human(n: int) -> str:
     return f"{n:.1f} GB"
 
 
-def download(url: str, filename: str, progress=None) -> Path:
+def download(url: str, filename: str, progress=None, headers: dict | None = None) -> Path:
     """Download into the cache and return the path. Cached files are reused."""
     CACHE.mkdir(parents=True, exist_ok=True)
     dest = CACHE / filename
@@ -140,7 +161,7 @@ def download(url: str, filename: str, progress=None) -> Path:
             progress(100, f"{filename} (cached)")
         return dest
     tmp = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(url, headers=UA)
+    req = urllib.request.Request(url, headers=headers or UA)
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             total = int(r.headers.get("Content-Length") or 0)
@@ -183,6 +204,28 @@ def resolve_feeder() -> tuple[str, dict[str, str]]:
     rel = _json(FEEDER_API)
     return (rel.get("tag_name", "?"),
             {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])})
+
+
+def feeder_bundle(assets: dict[str, str]) -> str | None:
+    """The single-archive asset, if this release ships one.
+
+    Upstream changed its release shape at v0.8.0: releases up to v0.7.0
+    published loose assets (`dlss5-feed.addon32`, `dlss5-feed-host64.exe`,
+    `DLSS5_Feed.fx`, ...), and from v0.8.0 they ship one
+    `DLSS5-Feeder-<version>.zip` containing all of them. Measured on v0.12.0,
+    2026-09-02: the release has exactly one asset, and the zip carries
+    `dlss5-feed.addon32`, `dlss5-feed.addon64`, `host64/dlss5-feed-host64.exe`
+    and `reshade-shaders/Shaders/DLSS5_Feed.fx`.
+
+    An installer that only looks for loose assets fails on every current
+    release with "the release has no dlss5-feed.addon32" while the file sits
+    inside the zip it already downloaded.
+    """
+    for name in assets:
+        low = name.lower()
+        if low.startswith("dlss5-feeder") and low.endswith(".zip"):
+            return name
+    return None
 
 
 def resolve_bridge() -> tuple[str, str]:
@@ -246,6 +289,56 @@ def pick(entries: list[dict], want: str | None) -> dict:
             if e["label"] == want or e["tag"] == want:
                 return e
     return entries[0]
+
+
+def pick_capped(entries: list[dict], max_label: str) -> str | None:
+    """The newest label at or below `max_label`, or None if there is none.
+
+    Some components must not simply take the newest build. The feeder route
+    detours renodx-dlss5, and upstream states that builds past v4.55 start
+    building part of the synthetic DLSS contract themselves, which conflicts
+    with the feeder doing the same job. So the feeder install asks for a
+    ceiling rather than for a fixed version: if the mirror ever drops 4.55,
+    the next-newest build below the ceiling is still correct, and if it
+    carries nothing at or below the ceiling this returns None and the caller
+    falls back to the newest with the constraint reported.
+
+    Comparison uses the same key the catalogue sorts by, so "4.7" and "4.70"
+    order correctly rather than by string.
+    """
+    if not entries:
+        return None
+    cap = _ver_key(max_label, "")
+    for e in entries:                      # already newest-first
+        if e["key"] <= cap:
+            return e["label"]
+    return None
+
+
+def resolve_dgvoodoo() -> tuple[str, str]:
+    """(version, url) for the newest dgVoodoo2 zip on the author's page.
+
+    The site is plain HTML with relative links of the form
+    `..\\bin\\dgVoodoo2_87_3.zip`, so the links are normalised against the
+    site root rather than joined blindly. Raises DownloadError rather than
+    guessing a URL: a wrong archive silently produces a broken D3D9 install.
+    """
+    html = _get(DGVOODOO_PAGE, timeout=90, headers=BROWSER_UA).decode("utf8", "replace")
+    hits = DGVOODOO_RE.findall(html)
+    if not hits:
+        raise DownloadError(
+            "Could not find a dgVoodoo2 download link on "
+            f"{DGVOODOO_PAGE}. Download it by hand and pass --local.")
+
+    def key(h: str) -> tuple:
+        nums = re.findall(r"\d+", Path(h.replace("\\", "/")).name)
+        return tuple(int(n) for n in nums) if nums else (0,)
+
+    best = max(hits, key=key)
+    name = Path(best.replace("\\", "/")).name
+    url = DGVOODOO_BASE + "bin/" + name
+    version = ".".join(str(n) for n in key(best))
+    return version, url
 
 
 def clear_cache() -> int:

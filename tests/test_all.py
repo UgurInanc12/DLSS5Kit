@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dlss5kit import config, diagnose, gpu, installer, peinfo, routes  # noqa: E402
+from dlss5kit import config, diagnose, gpu, installer, peinfo, routes, sources  # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -260,11 +260,27 @@ def test_routing():
         check("the beta status is stated",
               any("beta" in w for w in p4.warnings), str(p4.warnings)[:70])
 
-        # 32-bit on an API with no path is still refused, and says which.
+        # 32-bit OpenGL used to be refused here. It is not: upstream's 32-bit
+        # add-on accepts "Direct3D 11, OpenGL and Vulkan"
+        # (src/dlss5-feed32.cpp), and their Status table verifies OpenGL on
+        # Worms Ultimate Mayhem (32-bit, 4K, 0.13 ms/frame). This assertion
+        # was inverted on 2026-09-02 after reading the upstream source: the
+        # old expectation encoded our refusal, not reality.
         p5 = routes.choose(d2, peinfo.ApiInfo(api=peinfo.OPENGL,
                                               confidence="high"), 32)
-        check("32-bit OpenGL refused", p5.supported is False)
-        check("and names the API", peinfo.OPENGL in p5.blocker, p5.blocker[:70])
+        check("32-bit OpenGL is supported, not refused",
+              p5.supported and p5.route == routes.FEEDER,
+              f"{p5.supported}/{p5.route}")
+        check("and it says ReShade goes in as opengl32.dll",
+              "opengl32.dll" in p5.reason, p5.reason[:70])
+
+        # D3D10 has no translation layer and no hook, so it stays refused -
+        # proving the fall-through above did not simply open the gates.
+        p6 = routes.choose(d2, peinfo.ApiInfo(api=peinfo.DX10,
+                                              confidence="high"), 32)
+        check("32-bit D3D10 is still refused", p6.supported is False)
+        check("and the blocker names DirectX 10",
+              "DirectX 10" in p6.blocker, p6.blocker[:70])
 
         # Vulkan warns about the global layer
         pv = routes.choose(d2, peinfo.ApiInfo(api=peinfo.VULKAN), 64)
@@ -1154,7 +1170,10 @@ def test_engine_tools_and_rtx_remix():
     # real 64-bit Crysis64.exe (53 KB). Path and size both point the wrong
     # way; only the PE header settles it, so bitness has to score.
     crysis = Path(r"D:\Games\Steam\steamapps\common\Crysis")
-    if crysis.is_dir():
+    # is_dir() is not enough: measured 2026-09-02, the game was uninstalled
+    # and left behind an empty folder with only Game.log, which made
+    # resolve_target raise and took the whole suite down.
+    if crysis.is_dir() and peinfo.find_game_exes(crysis):
         pick, _ = peinfo.resolve_target(crysis)
         check("Crysis picks the 64-bit exe over the bigger 32-bit one",
               peinfo.exe_bitness(pick) == 64, f"{pick.name} is 32-bit")
@@ -1443,6 +1462,140 @@ def test_maglumkaynak_older_games():
               routes.anticheat_warning(clean / "bin") == "")
 
 
+def test_dx9_opengl_and_the_renodx_pin():
+    """Capability refusals that were wrong, and a version that was unpinned.
+
+    Read out of upstream (D:\\Hermes\\DLSS5-Feeder) on 2026-09-02 after Ugur
+    pointed at the repo: "onlar da dx9 da kullanmislar bu feeder i".
+    """
+    print("\n[dx9 via dgVoodoo2, opengl, and the renodx 4.55 pin]")
+
+    # 1. D3D9 is a supported route, not a refusal. Upstream verifies it on
+    #    Fable Anniversary (32-bit D3D9 via dgVoodoo2, 1440p 60 fps).
+    for bits in (32, 64):
+        p = routes.choose(None, peinfo.ApiInfo(api=peinfo.DX9,
+                                               confidence="high"), bits)
+        check(f"{bits}-bit D3D9 is supported",
+              p.supported and p.route == routes.FEEDER,
+              f"{p.supported}/{p.route}")
+        check(f"{bits}-bit D3D9 names dgVoodoo2",
+              "dgVoodoo2" in p.reason, p.reason[:60])
+        check(f"{bits}-bit D3D9 warns about the watermark check",
+              any("watermark" in w for w in p.warnings), str(p.warnings)[:70])
+        check(f"{bits}-bit D3D9 says ReShade goes in as dxgi.dll",
+              "dxgi.dll" in p.reason, p.reason[:60])
+    # A 64-bit D3D9 game should also hear that renodx-dlss covers it natively.
+    p64 = routes.choose(None, peinfo.ApiInfo(api=peinfo.DX9), 64)
+    check("64-bit D3D9 mentions the native renodx-dlss alternative",
+          any("renodx-dlss" in w for w in p64.warnings), str(p64.warnings)[:80])
+
+    # 2. The install plan gains a dgVoodoo2 step, first, and only for D3D9.
+    steps = installer.plan_steps(routes.FEEDER, 3, peinfo.DX9)
+    check("dgVoodoo2 is the first install step on D3D9",
+          steps and "dgVoodoo2" in steps[0], str(steps[:2]))
+    plain = installer.plan_steps(routes.FEEDER, 3, peinfo.DX11)
+    check("and it is absent on D3D11",
+          not any("dgVoodoo2" in s for s in plain), str(plain[:2]))
+
+    # 3. dgVoodoo.conf: the four settings upstream calls out, applied to the
+    #    real shipped file without destroying the rest of it.
+    conf_text = "\n".join([
+        "[General]", "OutputAPI = bestavailable", "Adapters = all",
+        "", "[Glide]", "VideoCard = voodoo_2",
+        "", "[DirectX]", "DisableAndPassThru = true", "VideoCard = internal3D",
+        "VRAM = 256", "dgVoodooWatermark = false", "Antialiasing = appdriven",
+    ])
+    with tempfile.TemporaryDirectory() as td:
+        conf = Path(td) / "dgVoodoo.conf"
+        conf.write_text(conf_text, encoding="utf8")
+        installer.write_dgvoodoo_conf(conf, watermark=True)
+        got = conf.read_text(encoding="utf8")
+        for want in ("DisableAndPassThru = false", "VRAM = 1GB",
+                     "OutputAPI = d3d11_fl11_0", "dgVoodooWatermark = true",
+                     "VideoCard = internal3D"):
+            check(f"conf sets {want}", want in got, got[:120])
+        check("the Glide section is left alone",
+              "VideoCard                           = voodoo_2" in got
+              or "VideoCard = voodoo_2" in got, "Glide VideoCard was rewritten")
+        check("unrelated keys survive", "Antialiasing = appdriven" in got)
+        installer.write_dgvoodoo_conf(conf, watermark=False)
+        check("the watermark can be turned back off",
+              "dgVoodooWatermark = false" in conf.read_text(encoding="utf8"))
+
+    # A conf that does not carry the expected keys must fail loudly rather
+    # than silently produce a passthrough install that does nothing.
+    with tempfile.TemporaryDirectory() as td:
+        bad = Path(td) / "dgVoodoo.conf"
+        bad.write_text("[DirectX]\nSomethingElse = 1\n", encoding="utf8")
+        try:
+            installer.write_dgvoodoo_conf(bad)
+            check("an unrecognised dgVoodoo.conf raises", False, "no raise")
+        except installer.InstallError:
+            check("an unrecognised dgVoodoo.conf raises", True)
+
+    # 4. Archives ship several copies of a name; the wrong one is unusable.
+    #    dgVoodoo2 2.87.3 carries Cpl/arm64/dgVoodooCpl.exe before the real
+    #    x64 build in the root, so a suffix match picks an ARM64 binary.
+    with tempfile.TemporaryDirectory() as td:
+        zp = Path(td) / "a.zip"
+        with zipfile.ZipFile(zp, "w") as z:
+            z.writestr("Cpl/arm64/dgVoodooCpl.exe", b"ARM64")
+            z.writestr("dgVoodooCpl.exe", b"X64")
+            z.writestr("MS/x86/D3D9.dll", b"32BIT")
+            z.writestr("MS/x64/D3D9.dll", b"64BIT")
+        check("suffix match picks the first, which is the wrong one",
+              installer.extract_member(zp, "dgVoodooCpl.exe") == b"ARM64")
+        check("exact match picks the root binary",
+              installer.extract_member(zp, "dgVoodooCpl.exe", exact=True) == b"X64")
+        check("exact match honours the architecture folder",
+              installer.extract_member(zp, "MS/x86/D3D9.dll", exact=True) == b"32BIT")
+
+    # 5. The feeder route must not install renodx newer than 4.55: upstream
+    #    states builds past it start building the synthetic contract
+    #    themselves and conflict with the feeder doing the same.
+    entries = [{"label": "4.70", "tag": "renodx-dlss5-4.70", "key": (4, 70)},
+               {"label": "4.60", "tag": "renodx-dlss5-4.60", "key": (4, 60)},
+               {"label": "4.55", "tag": "renodx-dlss5-4.55", "key": (4, 55)},
+               {"label": "4.5", "tag": "renodx-dlss5-4.5", "key": (4, 5)}]
+    check("the ceiling picks 4.55, not the newest",
+          sources.pick_capped(entries, installer.FEEDER_RENODX_MAX) == "4.55",
+          str(sources.pick_capped(entries, installer.FEEDER_RENODX_MAX)))
+    check("the pin constant is 4.55", installer.FEEDER_RENODX_MAX == "4.55")
+    check("a ceiling below everything returns None",
+          sources.pick_capped(entries, "1.0") is None)
+    check("an empty catalogue returns None",
+          sources.pick_capped([], "4.55") is None)
+    check("version order is numeric, not lexical",
+          sources.pick_capped(entries, "4.60") == "4.60")
+    # And the unconstrained pick still takes the newest, for native/bridge.
+    check("without a ceiling the newest is still chosen",
+          sources.pick(entries, None)["label"] == "4.70")
+
+
+    # 6. A tool must not mistake its own output for its input. A previous
+    #    32-bit install leaves host64\dlss5-feed-host64.exe beside the game;
+    #    measured on Far Cry 2026-09-02 the ranker picked it as "the game"
+    #    (64-bit +500, bin/ +200) over the real 32-bit FarCry.exe, and the
+    #    verdict flipped from DX9/feeder to DX12/native.
+    with tempfile.TemporaryDirectory() as td:
+        game = Path(td) / "Far Cry"
+        b32 = game / "Bin32"
+        make_pe(b32 / "FarCry.exe", peinfo.PE_X86, b"\0" * 30_000)
+        make_pe(b32 / "host64" / "dlss5-feed-host64.exe", peinfo.PE_X64,
+                b"\0" * 66_048)
+        make_pe(game / "_DLSS5_Backup" / "Bin32" / "FarCry.exe",
+                peinfo.PE_X86, b"\0" * 30_000)
+        exes = peinfo.find_game_exes(game)
+        names = [p.name for p in exes]
+        check("our own helper is not picked as the game",
+              names and names[0] == "FarCry.exe", str(names[:3]))
+        check("the helper is not even a candidate",
+              not any("host64" in str(p) for p in exes), str(names[:3]))
+        check("a leftover backup folder is not scanned",
+              not any("_DLSS5_Backup" in str(p) for p in exes),
+              str([str(p) for p in exes][:3]))
+
+
 def main() -> int:
     print("DLSS5Kit offline tests")
     test_ini()
@@ -1458,6 +1611,7 @@ def main() -> int:
     test_kit_addon_step()
     test_engine_tools_and_rtx_remix()
     test_maglumkaynak_older_games()
+    test_dx9_opengl_and_the_renodx_pin()
     test_32bit_install_layout()
     test_bridge_private_device_does_not_flip_the_verdict()
     test_generations_and_ptx()

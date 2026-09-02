@@ -53,6 +53,14 @@ _SKIP_PARTS = (
     # folder name, so --check named a configurator as the game and read DX9
     # off it.
     "configurator", "config", "settings", "options",
+    # Our own artefacts, and those of the tools we install. A previous
+    # install leaves a 64-bit helper beside a 32-bit game, and measured on
+    # Far Cry 2026-09-02 the ranker then picked dlss5-feed-host64.exe as
+    # "the game": 64-bit (+500) inside bin/ (+200), so it beat the real
+    # 32-bit FarCry.exe and the whole verdict flipped to DX12/native.
+    # A tool must never mistake its own output for its input.
+    "dlss5-feed-host64", "dlss5-feed", "dlss5kit", "dgvoodoocpl",
+    "reshade_setup",
 )
 
 _PRUNE_DIRS = {
@@ -63,6 +71,10 @@ _PRUNE_DIRS = {
     "crashreportclient", "epicwebhelper", "thirdparty", "steamvr", "openvr",
     "__installer", "dotnetfx", "movies", "content", "data", "assets", "textures",
     "reshade-shaders", "logbackups",
+    # Folders WE (or the tools we install) create. Scanning them means
+    # ranking our own binaries as candidate games, and a leftover backup
+    # folder from another tool can hold an entire second copy of the game.
+    "host64", "_dlss5_backup", "dlss5 screenshots",
 }
 _MAX_DEPTH = 5
 
@@ -497,37 +509,57 @@ def api_from_neighbour_dlls(folder: Path) -> tuple[str | None, str]:
 
 
 def _api_from_biggest_module(names: dict[str, Path]) -> tuple[str | None, str]:
-    """Read the renderer out of the largest neighbouring DLL.
+    """Read the renderer out of the neighbouring DLLs.
 
-    The engine module is by far the biggest file beside the executable, and
-    its own import table is real evidence. Only the Direct3D/Vulkan split is
-    decided here: the import table is definitive about what the module links
-    against, so counts are not needed.
+    The engine module is usually the biggest file beside the executable, and
+    its own import table is real evidence. But "biggest" is not always the
+    renderer: CryEngine 1 splits the renderer into one DLL per backend
+    (XRenderD3D9.dll, XRenderOGL.dll, XRenderNULL.dll) beside a dozen
+    equally sized subsystem DLLs, and measured on Far Cry (2004) the biggest
+    file in Bin32 is CryGame.dll (1.20 MB), which imports no renderer at all
+    while XRenderD3D9.dll (2.08 MB) imports d3d9.dll.
+
+    So every candidate module is examined, not just the largest, and the
+    strongest API found wins - with size breaking ties. Modern beats legacy
+    because an engine that ships both a D3D11 and a D3D9 renderer runs the
+    newer one by default on Windows.
     """
     if not names:
         return None, ""
-    try:
-        biggest = max(names.values(), key=lambda p: p.stat().st_size)
-    except (OSError, ValueError):
-        return None, ""
-    try:
-        if biggest.stat().st_size < 8 * 1024 * 1024:
-            return None, ""          # too small to be an engine
-    except OSError:
-        return None, ""
 
-    imports = pe_imports(biggest)
-    has = lambda d: any(d in i for i in imports)
-    if has("d3d12.dll"):
-        return DX12, (f"the engine module beside the executable "
-                      f"({biggest.name}) imports d3d12.dll")
-    if has("d3d11.dll"):
-        return DX11, (f"the engine module beside the executable "
-                      f"({biggest.name}) imports d3d11.dll")
-    if any(i.startswith("vulkan") for i in imports):
-        return VULKAN, (f"the engine module beside the executable "
-                        f"({biggest.name}) imports vulkan-1.dll")
-    return None, ""
+    ranked: list[tuple[int, int, str, Path]] = []
+    for name, path in names.items():
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if size < 64 * 1024:          # too small to hold a renderer
+            continue
+        imports = pe_imports(path)
+        if not imports:
+            continue
+        has = lambda d: any(d == i for i in imports)
+        if has("d3d12.dll"):
+            rank, api = 5, DX12
+        elif has("d3d11.dll"):
+            rank, api = 4, DX11
+        elif any(i.startswith("vulkan") for i in imports):
+            rank, api = 3, VULKAN
+        elif has("d3d9.dll"):
+            rank, api = 2, DX9
+        elif has("opengl32.dll"):
+            rank, api = 1, OPENGL
+        else:
+            continue
+        ranked.append((rank, size, api, path))
+
+    if not ranked:
+        return None, ""
+    rank, _size, api, path = max(ranked, key=lambda t: (t[0], t[1]))
+    module = {DX12: "d3d12.dll", DX11: "d3d11.dll", VULKAN: "vulkan-1.dll",
+              DX9: "d3d9.dll", OPENGL: "opengl32.dll"}[api]
+    return api, (f"the renderer module beside the executable "
+                 f"({path.name}) imports {module}")
 
 
 def detect_api(exe: Path, folder: Path | None = None) -> ApiInfo:
